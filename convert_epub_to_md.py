@@ -14,6 +14,15 @@ def clean_markdown_text(md: str) -> str:
         if line.strip().startswith('#'):
             md = '\n'.join(lines[i:])
             break
+    # Remove square brackets around citation-style blocks (not links)
+    md = re.sub(
+        r'(?<!\!)\[(.{20,}?)\](?!\()',
+        lambda m: m.group(1) if re.search(r'\w+\s+\(\d{4}', m.group(1)) else m.group(0),
+        md
+    )
+    # Convert isolated quotes followed by attribution into block quotes
+    quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
+    md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
     return md.strip() + '\n'
 #!/usr/bin/env python3
 
@@ -108,6 +117,36 @@ def extract_title_from_xhtml(xhtml_path: Path) -> str:
 
 # === CLI ===
 
+def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
+    """Create a Markdown-formatted TOC compatible with Obsidian."""
+    from collections import defaultdict
+    toc_lines = ["# Table of Contents", ""]
+    for entry in toc_entries:
+        # toc_entries: list of (file_part, anchor, label)
+        if len(entry) == 3:
+            file, anchor, label = entry
+            # Try to find depth from nesting of TOC (not available here, so default to 1)
+            depth = 1
+        elif len(entry) == 2:
+            file, label = entry
+            anchor = None
+            depth = 1
+        else:
+            continue
+        if file not in chapter_map:
+            continue
+        md_file = chapter_map[file]
+        indent = "  " * (depth - 1)
+        if anchor:
+            toc_lines.append(f"{indent}- [[{md_file}#{label}]]")
+        else:
+            toc_lines.append(f"{indent}- [[{md_file}]]")
+    toc_text = "\n".join(toc_lines)
+    toc_path = output_dir / "00 - Table of Contents.md"
+    with open(toc_path, "w", encoding="utf-8") as f:
+        f.write(toc_text)
+    print(f"TOC written to: {toc_path}")
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
@@ -186,7 +225,7 @@ def main():
         for fname in group:
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
-            header = f"# {title}\n\n"
+            header = f"## {title}\n\n"
             md_temp = temp_dir / f"{xhtml_path.stem}.md"  # Temporary file for raw Pandoc output
             run_pandoc(xhtml_path, md_temp)
             with open(md_temp, "r", encoding="utf-8") as f:
@@ -209,6 +248,10 @@ def main():
 
     print(f"EPUB extracted to: {temp_dir}")
     print(f"Markdown will be saved to: {output_dir}")
+
+    # Build map from XHTML filename to final Markdown filename
+    chapter_map = {src: entry["output_file"] for entry in conversion_log["chapters"] for src in entry["source_files"]}
+    generate_obsidian_toc(toc_entries, chapter_map, output_dir)
 
     log_path = LOG_DIR / f"{epub_file.stem}.json"  # Path for structured log output
     with open(log_path, "w", encoding="utf-8") as f:
