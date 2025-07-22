@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 def clean_markdown_text(md: str) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
     import re
@@ -24,7 +25,7 @@ def clean_markdown_text(md: str) -> str:
     quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
     md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
     return md.strip() + '\n'
-#!/usr/bin/env python3
+
 
 import os
 import sys
@@ -53,7 +54,11 @@ def find_opf_path(container_path: Path) -> Path:
     container_xml = container_path / "META-INF" / "container.xml"
     with open(container_xml, 'r', encoding='utf-8') as f:
         soup = BeautifulSoup(f, "xml")
-    return container_path / soup.find("rootfile")["full-path"]
+    rootfile = soup.find("rootfile")
+    if rootfile and rootfile.has_attr("full-path"):
+        return container_path / rootfile["full-path"]
+    else:
+        raise ValueError("Could not locate rootfile path in container.xml")
 
 def run_pandoc(input_file: Path, output_file: Path):
     """Converts a single XHTML file to Markdown using Pandoc.
@@ -214,33 +219,54 @@ def main():
     for f in ordered_files:
         print(f"  - {f}")
 
-    chapter_groups = group_chapter_files(ordered_files)  # Group files like chapter7 + chapter7a
+    # Determine which files are part of chapters (from TOC) and which are not
+    all_xhtml_files = {f.name for f in (content_root).glob("*.xhtml")}
+    toc_xhtml_order = [file for file, _, _ in toc_entries]
+    toc_used = set(toc_xhtml_order)
 
-    print("Grouped chapter files:")
+    front_matter = sorted(all_xhtml_files - toc_used)
+    back_matter = []  # For now, assume none unless we define rules to detect them
+
+    # Build final ordered list with section labels
+    file_sections = []
+
+    # Front matter: 00a, 00b, etc.
+    for i, fname in enumerate(front_matter):
+        label = f"00{chr(ord('a') + i)}"
+        file_sections.append((label, [fname]))
+
+    # Chapters from TOC: 01, 02, 03...
+    chapter_groups = group_chapter_files(toc_xhtml_order)
     for idx, group in enumerate(chapter_groups, start=1):
-        print(f"  Chapter {idx:02d}: {group}")
+        label = f"{idx:02d}"
+        file_sections.append((label, group))
 
-    for idx, group in enumerate(chapter_groups, start=1):  # Iterate through chapter groups
-        combined_md = []  # List to hold converted and cleaned Markdown for each part
+    # Back matter: 90, 91, etc. (placeholder logic — can expand later)
+    for i, fname in enumerate(back_matter):
+        label = f"{90 + i}"
+        file_sections.append((label, [fname]))
+
+    for label, group in file_sections:
+        combined_md = []
         for fname in group:
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
             header = f"## {title}\n\n"
-            md_temp = temp_dir / f"{xhtml_path.stem}.md"  # Temporary file for raw Pandoc output
+            md_temp = temp_dir / f"{xhtml_path.stem}.md"
             run_pandoc(xhtml_path, md_temp)
             with open(md_temp, "r", encoding="utf-8") as f:
                 raw_md = f.read()
                 md_content = clean_markdown_text(raw_md)
             combined_md.append(header + md_content)
-            md_temp.unlink()  # Clean up temporary Markdown file
+            md_temp.unlink()
 
-        output_filename = output_dir / f"{idx:02d} - {title}.md"  # Final output filename
+        output_filename = output_dir / f"{label} - {title}.md"
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write("\n\n".join(combined_md))
         print(f"Wrote {output_filename.name}")
 
         conversion_log["chapters"].append({
-            "index": idx,
+            "index": label,
             "title": title,
             "source_files": group,
             "output_file": output_filename.name
@@ -258,9 +284,6 @@ def main():
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
 
-if __name__ == "__main__":
-    main()
-
     # Preview titles for each file in each chapter group
     print("Section titles in each chapter group:")
     for idx, group in enumerate(chapter_groups, start=1):
@@ -269,3 +292,6 @@ if __name__ == "__main__":
             fpath = content_root / fname
             title = extract_title_from_xhtml(fpath)
             print(f"    - {fname} → {title}")
+
+if __name__ == "__main__":
+    main()
