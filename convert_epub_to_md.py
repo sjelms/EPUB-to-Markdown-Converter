@@ -1,3 +1,20 @@
+def clean_markdown_text(md: str) -> str:
+    """Apply post-processing cleanup rules to raw Markdown."""
+    import re
+    # Remove Pandoc fenced divs
+    md = re.sub(r'::: ?\{[^}]*\}', '', md)
+    md = re.sub(r':::', '', md)
+    # Remove markdown links with internal anchors (e.g. [text](#something))
+    md = re.sub(r'\[([^\]]+)\]\(#[^)]+\)', r'\1', md)
+    # Collapse multiple blank lines to a single one
+    md = re.sub(r'\n{3,}', '\n\n', md)
+    # Optionally: remove lines before first heading
+    lines = md.strip().splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith('#'):
+            md = '\n'.join(lines[i:])
+            break
+    return md.strip() + '\n'
 #!/usr/bin/env python3
 
 import os
@@ -30,13 +47,18 @@ def find_opf_path(container_path: Path) -> Path:
     return container_path / soup.find("rootfile")["full-path"]
 
 def run_pandoc(input_file: Path, output_file: Path):
-    """Converts a single XHTML file to Markdown using Pandoc."""
+    """Converts a single XHTML file to Markdown using Pandoc.
+
+    This function is responsible for structural conversion only.
+    It does not perform post-processing cleanup (e.g., line merging, YAML injection).
+    """
     subprocess.run([
-        "pandoc",
-        str(input_file),
-        "-f", "html",
-        "-t", "markdown",
-        "-o", str(output_file)
+        "pandoc",                      # Pandoc CLI
+        str(input_file),               # Input XHTML file
+        "-f", "html",                  # From format: HTML (XHTML compatible)
+        "-t", "markdown",              # To format: Markdown
+        "--wrap=none",                 # Prevent forced line breaks (natural wrapping)
+        "-o", str(output_file)         # Output Markdown file
     ], check=True)
 
 def parse_toc_xhtml(toc_path: Path):
@@ -89,16 +111,34 @@ def extract_title_from_xhtml(xhtml_path: Path) -> str:
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
-    parser.add_argument("epub_file", type=Path, help="Path to the .epub file")
+    parser.add_argument("epub_file", type=Path, nargs="?", help="Path to the .epub file")
+    parser.add_argument("--test-xhtml", type=Path, help="Run cleanup on a single XHTML file")
     args = parser.parse_args()
 
-    epub_file = args.epub_file.resolve()
+    if args.test_xhtml:
+        input_path = args.test_xhtml.resolve()
+        if not input_path.exists():
+            print(f"File not found: {input_path}")
+            sys.exit(1)
+
+        from tempfile import NamedTemporaryFile
+        with NamedTemporaryFile(suffix=".md", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            run_pandoc(input_path, tmp_path)
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                raw_md = f.read()
+                md_content = clean_markdown_text(raw_md)
+            print("=== Cleaned Markdown Output ===\n")
+            print(md_content)
+            tmp_path.unlink()
+        return
+
+    epub_file = args.epub_file.resolve()  # Resolve full path to EPUB
     if not epub_file.exists():
         print(f"File not found: {epub_file}")
         sys.exit(1)
 
-    # Create output directory
-    output_dir = OUTPUT_ROOT / epub_file.stem
+    output_dir = OUTPUT_ROOT / epub_file.stem  # Create folder named after EPUB file
     output_dir.mkdir(parents=True, exist_ok=True)
 
     conversion_log = {
@@ -107,25 +147,26 @@ def main():
         "chapters": []
     }
 
-    # Create temporary extraction directory
-    temp_dir = Path("/tmp") / f"epub_extract_{epub_file.stem}"
+    temp_dir = Path("/tmp") / f"epub_extract_{epub_file.stem}"  # Temporary extraction folder
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
 
-    # Extract EPUB contents
+    # Extract EPUB contents into temporary folder
     extract_epub(epub_file, temp_dir)
 
-    # Locate and parse TOC
-    toc_file = temp_dir / "OEBPS" / "toc.xhtml"
+    opf_path = find_opf_path(temp_dir)  # Locate OPF file via container.xml
+    content_root = opf_path.parent      # Set root for content folder (usually OEBPS or EPUB)
+
+    toc_file = content_root / "toc.xhtml"  # Look for the navigation file
     if not toc_file.exists():
         print("Error: toc.xhtml not found.")
         sys.exit(1)
 
-    toc_entries = parse_toc_xhtml(toc_file)
+    toc_entries = parse_toc_xhtml(toc_file)  # Parse TOC to get file order
     ordered_files = []
     seen = set()
-    for file, _, _ in toc_entries:
+    for file, _, _ in toc_entries:  # De-duplicate and track order
         if file not in seen:
             seen.add(file)
             ordered_files.append(file)
@@ -134,28 +175,27 @@ def main():
     for f in ordered_files:
         print(f"  - {f}")
 
-    # Group chapters (including multipart ones)
-    chapter_groups = group_chapter_files(ordered_files)
+    chapter_groups = group_chapter_files(ordered_files)  # Group files like chapter7 + chapter7a
 
     print("Grouped chapter files:")
     for idx, group in enumerate(chapter_groups, start=1):
         print(f"  Chapter {idx:02d}: {group}")
 
-    for idx, group in enumerate(chapter_groups, start=1):
-        combined_md = []
+    for idx, group in enumerate(chapter_groups, start=1):  # Iterate through chapter groups
+        combined_md = []  # List to hold converted and cleaned Markdown for each part
         for fname in group:
-            xhtml_path = temp_dir / "OEBPS" / fname
+            xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
             header = f"# {title}\n\n"
-            md_temp = temp_dir / f"{xhtml_path.stem}.md"
+            md_temp = temp_dir / f"{xhtml_path.stem}.md"  # Temporary file for raw Pandoc output
             run_pandoc(xhtml_path, md_temp)
             with open(md_temp, "r", encoding="utf-8") as f:
-                md_content = f.read()
+                raw_md = f.read()
+                md_content = clean_markdown_text(raw_md)
             combined_md.append(header + md_content)
-            md_temp.unlink()  # Remove temp .md file
+            md_temp.unlink()  # Clean up temporary Markdown file
 
-        # Save the final combined file with padded chapter number
-        output_filename = output_dir / f"{idx:02d} - {title}.md"
+        output_filename = output_dir / f"{idx:02d} - {title}.md"  # Final output filename
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write("\n\n".join(combined_md))
         print(f"Wrote {output_filename.name}")
@@ -170,7 +210,7 @@ def main():
     print(f"EPUB extracted to: {temp_dir}")
     print(f"Markdown will be saved to: {output_dir}")
 
-    log_path = LOG_DIR / f"{epub_file.stem}.json"
+    log_path = LOG_DIR / f"{epub_file.stem}.json"  # Path for structured log output
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
@@ -183,6 +223,6 @@ if __name__ == "__main__":
     for idx, group in enumerate(chapter_groups, start=1):
         print(f"  Chapter {idx:02d}:")
         for fname in group:
-            fpath = temp_dir / "OEBPS" / fname
+            fpath = content_root / fname
             title = extract_title_from_xhtml(fpath)
             print(f"    - {fname} → {title}")

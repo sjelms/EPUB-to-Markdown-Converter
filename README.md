@@ -55,10 +55,10 @@ An EPUB file is essentially a `.zip` archive containing:
 5. **Convert XHTML to Markdown**  
    For each `.xhtml` chapter:
    - Extract `<title>` from `<head>` section
-   - Rename output markdown file to match title (e.g., `Chapter 4 - Promoting Health.md`)
+   - Rename output markdown file to match title (e.g., `01 - Promoting Health.md`)
    - Merge multi-part chapters (e.g., chapter7.xhtml + chapter7a.xhtml) using TOC order
    - Convert XHTML body content to Markdown using `pandoc`
-   - Replace image paths (`<img src="images/...">` ➝ `![](images/...)`)
+   - A separate function applies post-processing cleanup rules
 
 6. **Update Internal Links**  
    - Parse `<a href="Chapter-2.xhtml#...">` and replace with  
@@ -71,6 +71,14 @@ An EPUB file is essentially a `.zip` archive containing:
 
 8. **Clean Up**
    - Remove temporary extraction directory
+
+9. **Post-Processing Cleanup**  
+   - Clean up Markdown using custom rules:
+     - Remove Pandoc divs (`:::`)
+     - Remove same-file anchor links (`#...`)
+     - Flatten bracketed references and citation artifacts
+     - Normalize paragraph spacing
+     - Clean up and reformat the References section
 
 ---
 
@@ -99,11 +107,13 @@ pip install beautifulsoup4 lxml
 - The `<title>` tag is assumed to contain the correct chapter name
 - Titles will be slugified for use in internal link resolution
 - Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be merged based on TOC structure
+- The cleanup stage uses a dedicated Python function that can be adjusted as needed for formatting edge cases.
 
 ---
 
 ## 🚀 Future Improvements
 
 - Optional metadata frontmatter (e.g., `title`, `chapter`, `source`)
-- YAML header for Obsidian compatibility
+- ✅ YAML header for Obsidian compatibility (partially implemented)
+- Extend post-processing rules for quotes, footnotes, and special formatting
 - GUI wrapper for drag-and-drop usage
