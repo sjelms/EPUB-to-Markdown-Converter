@@ -73,12 +73,15 @@ An EPUB file is essentially a `.zip` archive containing:
    - Remove temporary extraction directory
 
 9. **Post-Processing Cleanup**  
-   - Clean up Markdown using custom rules:
-     - Remove Pandoc divs (`:::`)
-     - Remove same-file anchor links (`#...`)
-     - Flatten bracketed references and citation artifacts
-     - Normalize paragraph spacing
-     - Clean up and reformat the References section
+   - Clean up Markdown using custom Python rules:
+     - Remove Pandoc-generated div blocks (`:::`)
+     - Remove same-file anchor links (e.g. `#span_00123`)
+     - Normalize heading levels (only one H1 per file; internal sections use H2-H6)
+     - Convert inline `<q>` tags to Obsidian-style block quotes
+     - Flatten bracketed reference clusters and remove inline citations
+     - Normalize paragraph and line spacing
+     - Clean up and collapse multi-line reference sections
+     - Rewrite internal cross-file links using `[[Note Name#Heading]]` syntax
 
 ---
 
@@ -94,7 +97,7 @@ Install with:
 brew install pandoc
 ```
 
-Optional:
+Required (Python):
 ```bash
 pip install beautifulsoup4 lxml
 ```
@@ -108,6 +111,7 @@ pip install beautifulsoup4 lxml
 - Titles will be slugified for use in internal link resolution
 - Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be merged based on TOC structure
 - The cleanup stage uses a dedicated Python function that can be adjusted as needed for formatting edge cases.
+ - The script uses the full path to Pandoc (`/opt/homebrew/bin/pandoc`) to ensure compatibility with Automator workflows.
 
 ---
 

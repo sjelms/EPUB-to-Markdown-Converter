@@ -57,6 +57,10 @@ from bs4 import BeautifulSoup
 import zipfile
 import shutil
 import json
+# Suppress XML parser warnings from BeautifulSoup
+from bs4 import XMLParsedAsHTMLWarning
+import warnings
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # === Constants ===
 OUTPUT_ROOT = Path("/Users/stephenelms/Documents/Epub to Md")
@@ -88,7 +92,7 @@ def run_pandoc(input_file: Path, output_file: Path):
     It does not perform post-processing cleanup (e.g., line merging, YAML injection).
     """
     subprocess.run([
-        "pandoc",                      # Pandoc CLI
+        "/opt/homebrew/bin/pandoc",  # Full path to Pandoc binary
         str(input_file),               # Input XHTML file
         "-f", "html",                  # From format: HTML (XHTML compatible)
         "-t", "markdown",              # To format: Markdown
@@ -100,7 +104,7 @@ def parse_toc_xhtml(toc_path: Path):
     """Parses toc.xhtml and returns a list of (filename, anchor, label) in TOC order."""
     from bs4 import BeautifulSoup
     with open(toc_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'lxml')
+        soup = BeautifulSoup(f, 'xml')  # Use strict XML parsing
 
     toc_entries = []
     for a in soup.find_all('a', href=True):
@@ -137,7 +141,7 @@ def group_chapter_files(ordered_files):
 def extract_title_from_xhtml(xhtml_path: Path) -> str:
     """Extracts the <title> from an XHTML file."""
     with open(xhtml_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'lxml')
+        soup = BeautifulSoup(f, 'xml')  # Use strict XML parsing
     title_tag = soup.find('title')
     return title_tag.get_text(strip=True) if title_tag else "Untitled"
 
