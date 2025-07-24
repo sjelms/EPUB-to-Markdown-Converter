@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-def clean_markdown_text(md: str) -> str:
+def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
     import re
     # Remove Pandoc fenced divs
     md = re.sub(r'::: ?\{[^}]*\}', '', md)
     md = re.sub(r':::', '', md)
-    # Remove markdown links with internal anchors (e.g. [text](#something))
+    # Remove same-file internal anchor links: [text](#anchor)
     md = re.sub(r'\[([^\]]+)\]\(#[^)]+\)', r'\1', md)
+
+    # Preserve and optionally reformat cross-file links: [text](chapter3.xhtml#Section2)
+    # These are assumed to be converted in a later step or kept as-is for Obsidian
+    # No change needed unless formatting is required
     # Collapse multiple blank lines to a single one
     md = re.sub(r'\n{3,}', '\n\n', md)
     # Optionally: remove lines before first heading
@@ -24,6 +28,23 @@ def clean_markdown_text(md: str) -> str:
     # Convert isolated quotes followed by attribution into block quotes
     quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
     md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
+
+    # Convert cross-chapter links to Obsidian-style [[filename#heading]]
+    if chapter_map:
+        def replace_cross_links(match):
+            text, target = match.group(1), match.group(2)
+            if "#" in target:
+                file_part, anchor = target.split("#", 1)
+            else:
+                file_part, anchor = target, ""
+            if file_part in chapter_map:
+                md_target = chapter_map[file_part]
+                return f"[[{md_target}#{anchor}]]" if anchor else f"[[{md_target}]]"
+            else:
+                return text  # Leave unchanged if file not found
+
+        md = re.sub(r'\[([^\]]+)\]\(([^)]+\.xhtml#[^)]+)\)', replace_cross_links, md)
+
     return md.strip() + '\n'
 
 
@@ -171,7 +192,7 @@ def main():
             run_pandoc(input_path, tmp_path)
             with open(tmp_path, "r", encoding="utf-8") as f:
                 raw_md = f.read()
-                md_content = clean_markdown_text(raw_md)
+                md_content = clean_markdown_text(raw_md, None)
             print("=== Cleaned Markdown Output ===\n")
             print(md_content)
             tmp_path.unlink()
@@ -225,7 +246,24 @@ def main():
     toc_used = set(toc_xhtml_order)
 
     front_matter = sorted(all_xhtml_files - toc_used)
-    back_matter = []  # For now, assume none unless we define rules to detect them
+
+    # --- Automatic back matter detection based on title keywords ---
+    # Detect back matter files using title keywords
+    back_keywords = ["references", "glossary", "index"]
+    new_toc_xhtml_order = []
+    back_matter = []
+
+    for file in toc_xhtml_order:
+        xhtml_path = content_root / file
+        title = extract_title_from_xhtml(xhtml_path).lower()
+        if any(keyword in title for keyword in back_keywords):
+            back_matter.append(file)
+        else:
+            new_toc_xhtml_order.append(file)
+
+    toc_xhtml_order = new_toc_xhtml_order
+    toc_used = set(toc_xhtml_order)  # Update used set to exclude back matter
+    # --------------------------------------------------------------
 
     # Build final ordered list with section labels
     file_sections = []
@@ -241,12 +279,14 @@ def main():
         label = f"{idx:02d}"
         file_sections.append((label, group))
 
-    # Back matter: 90, 91, etc. (placeholder logic — can expand later)
+    # Back matter: 90, 91, 92, etc.
     for i, fname in enumerate(back_matter):
         label = f"{90 + i}"
         file_sections.append((label, [fname]))
 
     for label, group in file_sections:
+        if not group:
+            continue  # Skip empty groups to avoid unbound title error
         combined_md = []
         for fname in group:
             xhtml_path = content_root / fname
@@ -256,7 +296,7 @@ def main():
             run_pandoc(xhtml_path, md_temp)
             with open(md_temp, "r", encoding="utf-8") as f:
                 raw_md = f.read()
-                md_content = clean_markdown_text(raw_md)
+                md_content = clean_markdown_text(raw_md, chapter_map=None)  # Will update after chapter_map defined
             combined_md.append(header + md_content)
             md_temp.unlink()
 
@@ -277,6 +317,29 @@ def main():
 
     # Build map from XHTML filename to final Markdown filename
     chapter_map = {src: entry["output_file"] for entry in conversion_log["chapters"] for src in entry["source_files"]}
+
+    # Re-run cleanup with chapter_map to convert cross-file links properly
+    for label, group in file_sections:
+        if not group:
+            continue  # Skip empty groups to avoid unbound title error
+        combined_md = []
+        for fname in group:
+            xhtml_path = content_root / fname
+            title = extract_title_from_xhtml(xhtml_path)
+            header = f"## {title}\n\n"
+            md_temp = temp_dir / f"{xhtml_path.stem}.md"
+            run_pandoc(xhtml_path, md_temp)
+            with open(md_temp, "r", encoding="utf-8") as f:
+                raw_md = f.read()
+                md_content = clean_markdown_text(raw_md, chapter_map)
+            combined_md.append(header + md_content)
+            md_temp.unlink()
+
+        output_filename = output_dir / f"{label} - {title}.md"
+        with open(output_filename, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(combined_md))
+        print(f"Wrote {output_filename.name}")
+
     generate_obsidian_toc(toc_entries, chapter_map, output_dir)
 
     log_path = LOG_DIR / f"{epub_file.stem}.json"  # Path for structured log output
