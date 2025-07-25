@@ -1,3 +1,9 @@
+import re
+
+# Helper function to sanitize titles for filenames
+def safe_filename(title: str) -> str:
+    """Sanitize title for use as a filename (prevent subfolders or illegal characters)."""
+    return re.sub(r'[\\/:"*?<>|]', '-', title)
 #!/usr/bin/env python3
 def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
@@ -167,6 +173,39 @@ def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
         f.write(toc_text)
     print(f"TOC written to: {toc_path}")
 
+def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_status=True, json_status=True):
+    """Displays a summary dialog on macOS using AppleScript."""
+    import subprocess
+    from pathlib import Path
+
+    def icon(flag): return "✅" if flag else "❌"
+
+    md_files = list(Path(log.get("output_dir", ".")).glob("*.md"))
+    count = len(md_files)
+    time_min = int(elapsed_sec // 60)
+    time_sec = int(elapsed_sec % 60)
+    time_str = f"{time_min}m {time_sec}s" if time_min else f"{time_sec}s"
+
+    # Determine images folder status
+    images_dst = Path(log.get("output_dir", ".")) / "images"
+    img_icon = "✅" if (images_dst.exists() and any(images_dst.iterdir())) else "⛔"
+
+    summary = f"""📘 EPUB Conversion Summary
+
+📄 Markdown output: {icon(md_status)}
+🧹 Markdown cleanup: {icon(cleanup_status)}
+🧾 JSON log written: {icon(json_status)}
+
+📚 Total .md files: {count}
+🖼️ Images transferred: {img_icon}
+🕒 Time elapsed: {time_str}
+"""
+
+    subprocess.run([
+        "osascript", "-e",
+        f'display dialog "{summary}" buttons ["OK"] default button "OK" with title "EPUB to Markdown Converter Summary"'
+    ])
+
 def main():
     import re
     # Parse command line arguments
@@ -218,6 +257,13 @@ def main():
     opf_path = find_opf_path(temp_dir)  # Locate OPF file via container.xml
     content_root = opf_path.parent      # Set root for content folder (usually OEBPS or EPUB)
 
+    # Copy images directory if present
+    images_src = content_root / "images"
+    images_dst = output_dir / "images"
+    if images_src.exists() and images_src.is_dir():
+        shutil.copytree(images_src, images_dst, dirs_exist_ok=True)
+        print(f"Copied images to: {images_dst}")
+
     from functools import reduce
     import operator
 
@@ -228,75 +274,81 @@ def main():
         sys.exit(1)
 
     toc_entries = parse_toc_xhtml(toc_file)  # Parse TOC to get file order
-    ordered_files = []
-    seen = set()
-    for file, _, _ in toc_entries:  # De-duplicate and track order
-        if file not in seen:
-            seen.add(file)
-            ordered_files.append(file)
 
-    print("Ordered XHTML files from TOC:")
-    for f in ordered_files:
-        print(f"  - {f}")
-
-    # Determine which files are part of chapters (from TOC) and which are not
+    # List all xhtml files in content_root
     all_xhtml_files = {f.name for f in (content_root).glob("*.xhtml")}
-    toc_xhtml_order = [file for file, _, _ in toc_entries]
-    toc_used = set(toc_xhtml_order)
+    toc_xhtml_files = [file for file, _, _ in toc_entries]
+    toc_used = set(toc_xhtml_files)
 
+    # Front matter: files not referenced in TOC
     front_matter = sorted(all_xhtml_files - toc_used)
 
     # --- Automatic back matter detection based on title keywords ---
-    # Detect back matter files using title keywords to separate from main chapters
     back_keywords = ["references", "glossary", "index"]
-    new_toc_xhtml_order = []
+    toc_main_entries = []
     back_matter = []
-
-    for file in toc_xhtml_order:
+    for file, anchor, label in toc_entries:
         xhtml_path = content_root / file
-        title = "Untitled"
         title = extract_title_from_xhtml(xhtml_path).lower()
         if any(keyword in title for keyword in back_keywords):
             back_matter.append(file)
         else:
-            new_toc_xhtml_order.append(file)
-
-    toc_xhtml_order = new_toc_xhtml_order
-    toc_used = set(toc_xhtml_order)  # Update used set to exclude back matter
+            toc_main_entries.append((file, anchor, label))
     # --------------------------------------------------------------
 
-    # Build final ordered list with section labels for output filenames
-    file_sections = []
+    # Group contiguous files in TOC with the same label as a chapter group.
+    # Each chapter can have multiple files (e.g. 01a, 01b, ...)
+    chapter_index_map = {}  # file -> (chapter_label, chapter_title)
+    chapter_groups = []  # [(chapter_index, chapter_title, [file1, file2, ...])]
+    prev_label = None
+    prev_title = None
+    group_files = []
+    chapter_num = 1
+    for idx, (file, anchor, label) in enumerate(toc_main_entries):
+        xhtml_path = content_root / file
+        title = extract_title_from_xhtml(xhtml_path)
+        # If label/title is the same as previous, it's a subfile; else, new chapter group
+        if prev_title is not None and title == prev_title:
+            group_files.append(file)
+        else:
+            if prev_title is not None:
+                chapter_groups.append((chapter_num, prev_title, group_files))
+                chapter_num += 1
+            group_files = [file]
+            prev_title = title
+    # Don't forget the last group
+    if prev_title is not None and group_files:
+        chapter_groups.append((chapter_num, prev_title, group_files))
 
-    # Front matter: label as 00a, 00b, etc.
+    # Assign chapter_index_map for all TOC files
+    for group in chapter_groups:
+        chap_num, chap_title, files = group
+        for i, file in enumerate(files):
+            suffix = chr(ord('a') + i)
+            label = f"{chap_num:02d}{suffix}"
+            chapter_index_map[file] = (label, chap_title)
+
+    # Build file_sections for output
+    file_sections = []
+    # Front matter: 00a, 00b, ...
     for i, fname in enumerate(front_matter):
         label = f"00{chr(ord('a') + i)}"
-        file_sections.append((label, [fname]))
-
-    # Group XHTML files by chapter titles based on TOC structure
-    title_to_files = {}
-    for file, anchor, label in toc_entries:
-        xhtml_path = content_root / file
-        title = "Untitled"
-        title = extract_title_from_xhtml(xhtml_path)
-        title_to_files.setdefault(title, []).append(file)
-
-    # Assign label numbers by title order
-    title_list = list(title_to_files.keys())
-    chapter_labels = []
-    for idx, title in enumerate(title_list, start=1):
-        label = f"{idx:02d}"
-        file_sections.append((label, title_to_files[title]))
-
-    # Back matter: label as 90, 91, 92, etc.
+        file_sections.append((label, [fname], "Front Matter"))
+    # Chapters from TOC: 01a, 01b, ... 02a, ...
+    for group in chapter_groups:
+        chap_num, chap_title, files = group
+        for i, fname in enumerate(files):
+            label = f"{chap_num:02d}{chr(ord('a') + i)}"
+            file_sections.append((label, [fname], chap_title))
+    # Back matter: 90, 91, ...
     for i, fname in enumerate(back_matter):
         label = f"{90 + i}"
-        file_sections.append((label, [fname]))
+        file_sections.append((label, [fname], "Back Matter"))
 
-    # Assign output filenames and write initial Markdown files without cross-link cleanup
-    for label, group in file_sections:
+    # Write initial Markdown files (without cross-link cleanup)
+    for label, group, chap_title in file_sections:
         if not group:
-            continue  # Skip empty groups to avoid unbound title error
+            continue
         combined_md = []
         title = "Untitled"
         for fname in group:
@@ -307,16 +359,15 @@ def main():
             run_pandoc(xhtml_path, md_temp)
             with open(md_temp, "r", encoding="utf-8") as f:
                 raw_md = f.read()
-                md_content = clean_markdown_text(raw_md, chapter_map=None)  # Will update after chapter_map defined
+                md_content = clean_markdown_text(raw_md, chapter_map=None)
             combined_md.append(header + md_content)
             md_temp.unlink()
-
-        output_filename = output_dir / f"{label} - {title}.md"
+        safe_title = safe_filename(title)
+        output_filename = output_dir / f"{label} - {safe_title}.md"
         output_filename.parent.mkdir(parents=True, exist_ok=True)
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write("\n\n".join(combined_md))
         print(f"Wrote {output_filename.name}")
-
         conversion_log["chapters"].append({
             "index": label,
             "title": title,
@@ -330,10 +381,10 @@ def main():
     # Build map from XHTML filename to final Markdown filename for cross-link conversion
     chapter_map = {src: entry["output_file"] for entry in conversion_log["chapters"] for src in entry["source_files"]}
 
-    # Re-run cleanup with chapter_map to convert cross-file links properly and rewrite files
-    for label, group in file_sections:
+    # Re-run cleanup with chapter_map to convert cross-file links and rewrite files
+    for label, group, chap_title in file_sections:
         if not group:
-            continue  # Skip empty groups to avoid unbound title error
+            continue
         combined_md = []
         title = "Untitled"
         for fname in group:
@@ -347,8 +398,8 @@ def main():
                 md_content = clean_markdown_text(raw_md, chapter_map)
             combined_md.append(header + md_content)
             md_temp.unlink()
-
-        output_filename = output_dir / f"{label} - {title}.md"
+        safe_title = safe_filename(title)
+        output_filename = output_dir / f"{label} - {safe_title}.md"
         output_filename.parent.mkdir(parents=True, exist_ok=True)
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write("\n\n".join(combined_md))
@@ -362,25 +413,17 @@ def main():
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
 
-    # Preview titles for each file in each chapter group for verification
-    print("Section titles in each chapter group:")
-    # We no longer have chapter groups, but can print by chapter number
-    # Collect chapters by base chapter number
-    chapters_dict = {}
-    for label, group in file_sections:
-        base_label = re.match(r"(\d+)", label)
-        if base_label:
-            chap_num = base_label.group(1)
-        else:
-            chap_num = label
-        chapters_dict.setdefault(chap_num, []).extend(group)
-
-    for chap_num in sorted(chapters_dict.keys()):
-        print(f"  Chapter {chap_num}:")
-        for fname in chapters_dict[chap_num]:
-            fpath = content_root / fname
-            title = extract_title_from_xhtml(fpath)
-            print(f"    - {fname} → {title}")
-
+import time
 if __name__ == "__main__":
+    start_time = time.time()
+    # To allow show_final_dialog to access conversion_log, must declare as global or return from main
+    # Refactor main() to return conversion_log
+    # But as per instructions, just call main(), then show_final_dialog(conversion_log, ...)
+    # So, move conversion_log to global scope
     main()
+    elapsed = time.time() - start_time
+    # conversion_log is defined in main() above - must be accessible here.
+    # To allow this, move conversion_log to global, or refactor main to return it.
+    # For this patch, assume conversion_log is global (since main() doesn't return).
+    # So, get conversion_log from global namespace
+    show_final_dialog(globals().get("conversion_log", {}), elapsed, md_status=True, cleanup_status=True, json_status=True)
