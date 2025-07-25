@@ -107,14 +107,18 @@ def run_pandoc(input_file: Path, output_file: Path):
     This function is responsible for structural conversion only.
     It does not perform post-processing cleanup (e.g., line merging, YAML injection).
     """
-    subprocess.run([
-        "/opt/homebrew/bin/pandoc",  # Full path to Pandoc binary
-        str(input_file),               # Input XHTML file
-        "-f", "html",                  # From format: HTML (XHTML compatible)
-        "-t", "markdown",              # To format: Markdown
-        "--wrap=none",                 # Prevent forced line breaks (natural wrapping)
-        "-o", str(output_file)         # Output Markdown file
-    ], check=True)
+    try:
+        subprocess.run([
+            "/opt/homebrew/bin/pandoc",  # Full path to Pandoc binary
+            str(input_file),               # Input XHTML file
+            "-f", "html",                  # From format: HTML (XHTML compatible)
+            "-t", "markdown",              # To format: Markdown
+            "--wrap=none",                 # Prevent forced line breaks (natural wrapping)
+            "-o", str(output_file)         # Output Markdown file
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Pandoc failed for file {input_file}")
+        raise e
 
 def parse_toc_xhtml(toc_path: Path):
     """Parses toc.xhtml and returns a list of (filename, anchor, label) in TOC order."""
@@ -147,6 +151,12 @@ def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
     """Create a Markdown-formatted TOC compatible with Obsidian."""
     from collections import defaultdict
     toc_lines = ["# Table of Contents", ""]
+    def obsidian_anchor(text):
+        text = re.sub(r'[^\w\s-]', '', text)  # Remove punctuation
+        text = re.sub(r'\s+', '-', text.strip().lower())  # Replace spaces with hyphens
+        return text
+    skip_mode = False
+    duplicate_anchors = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "pi", "pii", "piii", "piv"}
     for entry in toc_entries:
         # toc_entries: list of (file_part, anchor, label)
         if len(entry) == 3:
@@ -159,12 +169,19 @@ def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
             depth = 1
         else:
             continue
+        # Insert skip logic for Arabic/duplicate sections
+        # If label has Arabic TOC or matches duplicate anchor, skip all subsequent entries
+        if any(kw in (label or "") for kw in ["قائمة الصفحات", "قائمة", "Index"]) or (anchor and re.match(r'^p?i{1,3}v?$', anchor)):
+            skip_mode = True
+        if skip_mode:
+            continue
         if file not in chapter_map:
             continue
         md_file = chapter_map[file]
         indent = "  " * (depth - 1)
         if anchor:
-            toc_lines.append(f"{indent}- [[{md_file}#{label}]]")
+            clean_anchor = obsidian_anchor(label)
+            toc_lines.append(f"{indent}- [[{md_file}#{clean_anchor}]]")
         else:
             toc_lines.append(f"{indent}- [[{md_file}]]")
     toc_text = "\n".join(toc_lines)
@@ -180,6 +197,7 @@ def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_sta
 
     def icon(flag): return "✅" if flag else "❌"
 
+    from pathlib import Path
     md_files = list(Path(log.get("output_dir", ".")).glob("*.md"))
     count = len(md_files)
     time_min = int(elapsed_sec // 60)
@@ -193,11 +211,15 @@ def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_sta
     summary = f"""📘 EPUB Conversion Summary
 
 📄 Markdown output: {icon(md_status)}
+
 🧹 Markdown cleanup: {icon(cleanup_status)}
+
 🧾 JSON log written: {icon(json_status)}
 
-📚 Total .md files: {count}
 🖼️ Images transferred: {img_icon}
+
+📚 Total .md files: {count}
+
 🕒 Time elapsed: {time_str}
 """
 
@@ -251,8 +273,10 @@ def main():
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
 
+    # === PHASE 1: Pandoc Conversion Phase ===
     # Extract EPUB contents into temporary folder for processing
     extract_epub(epub_file, temp_dir)
+    print(f"EPUB extracted to: {temp_dir}")
 
     opf_path = find_opf_path(temp_dir)  # Locate OPF file via container.xml
     content_root = opf_path.parent      # Set root for content folder (usually OEBPS or EPUB)
@@ -263,9 +287,6 @@ def main():
     if images_src.exists() and images_src.is_dir():
         shutil.copytree(images_src, images_dst, dirs_exist_ok=True)
         print(f"Copied images to: {images_dst}")
-
-    from functools import reduce
-    import operator
 
     # Parse the Table of Contents (toc.xhtml) to obtain ordered chapter files
     toc_file = content_root / "toc.xhtml"  # Look for the navigation file
@@ -285,15 +306,18 @@ def main():
 
     # --- Automatic back matter detection based on title keywords ---
     back_keywords = ["references", "glossary", "index"]
-    toc_main_entries = []
+    # Remove toc.xhtml from TOC-driven structure (already handled separately as front matter)
+    toc_main_entries = [(f, a, l) for f, a, l in toc_entries if "toc.xhtml" not in f]
     back_matter = []
-    for file, anchor, label in toc_entries:
+    filtered_toc_main_entries = []
+    for file, anchor, label in toc_main_entries:
         xhtml_path = content_root / file
         title = extract_title_from_xhtml(xhtml_path).lower()
         if any(keyword in title for keyword in back_keywords):
             back_matter.append(file)
         else:
-            toc_main_entries.append((file, anchor, label))
+            filtered_toc_main_entries.append((file, anchor, label))
+    toc_main_entries = filtered_toc_main_entries
     # --------------------------------------------------------------
 
     # Group contiguous files in TOC with the same label as a chapter group.
@@ -345,65 +369,86 @@ def main():
         label = f"{90 + i}"
         file_sections.append((label, [fname], "Back Matter"))
 
-    # Write initial Markdown files (without cross-link cleanup)
+    # --- PHASE 1: Pandoc Conversion Phase ---
+    # Convert all .xhtml files to temp .md files in a dedicated temp_md_dir
+    temp_md_dir = temp_dir / "md"
+    temp_md_dir.mkdir(parents=True, exist_ok=True)
+    xhtml_files_for_md = list(all_xhtml_files)
+    # Validation step: Check XHTML files exist before Pandoc conversion
+    for xhtml_file in xhtml_files_for_md:
+        xhtml_path = content_root / xhtml_file
+        if not xhtml_path.exists():
+            print(f"Warning: XHTML file missing: {xhtml_path}")
+    for xhtml_file in xhtml_files_for_md:
+        xhtml_path = content_root / xhtml_file
+        md_temp_path = temp_md_dir / f"{Path(xhtml_file).stem}.md"
+        run_pandoc(xhtml_path, md_temp_path)
+    print(f"[Phase 1] Converted {len(xhtml_files_for_md)} XHTML files to Markdown in temp folder: {temp_md_dir}")
+
+    # --- PHASE 2: File Naming & Renaming Phase ---
+    # Assign logical filenames (00a, 01a, etc.) based on TOC and extracted titles.
+    # Move .md files from temp_md_dir to final output directory.
+    chapter_map = {}  # XHTML file -> final .md filename
     for label, group, chap_title in file_sections:
         if not group:
             continue
-        combined_md = []
-        title = "Untitled"
         for fname in group:
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
-            header = f"## {title}\n\n"
-            md_temp = temp_dir / f"{xhtml_path.stem}.md"
-            run_pandoc(xhtml_path, md_temp)
-            with open(md_temp, "r", encoding="utf-8") as f:
-                raw_md = f.read()
-                md_content = clean_markdown_text(raw_md, chapter_map=None)
-            combined_md.append(header + md_content)
-            md_temp.unlink()
-        safe_title = safe_filename(title)
-        output_filename = output_dir / f"{label} - {safe_title}.md"
-        output_filename.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_filename, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(combined_md))
-        print(f"Wrote {output_filename.name}")
-        conversion_log["chapters"].append({
-            "index": label,
-            "title": title,
-            "source_files": group,
-            "output_file": output_filename.name
-        })
+            safe_title = safe_filename(title)
+            output_filename = f"{label} - {safe_title}.md"
+            stem = Path(fname).stem
+            md_temp_path = temp_md_dir / (Path(fname).stem + ".md")
+            output_path = output_dir / output_filename
+            # Check if the expected file exists before moving
+            if not md_temp_path.exists():
+                print(f"Warning: Expected file not found: {md_temp_path}")
+                continue
+            # Move/rename the file
+            shutil.move(str(md_temp_path), str(output_path))
+            chapter_map[fname] = output_filename
+            # Log for JSON
+            conversion_log["chapters"].append({
+                "index": label,
+                "title": title,
+                "source_files": [fname],
+                "output_file": output_filename
+            })
+            print(f"[Phase 2] Moved {md_temp_path.name} to {output_filename}")
 
-    print(f"EPUB extracted to: {temp_dir}")
-    print(f"Markdown will be saved to: {output_dir}")
+    # Remove any leftover temp .md files (should be none, but for safety)
+    for f in temp_md_dir.glob("*.md"):
+        f.unlink()
+    # Only remove temp_md_dir if it is empty
+    if not any(temp_md_dir.iterdir()):
+        temp_md_dir.rmdir()
+    print(f"[Phase 2] Temp Markdown files cleaned up.")
 
-    # Build map from XHTML filename to final Markdown filename for cross-link conversion
-    chapter_map = {src: entry["output_file"] for entry in conversion_log["chapters"] for src in entry["source_files"]}
-
-    # Re-run cleanup with chapter_map to convert cross-file links and rewrite files
-    for label, group, chap_title in file_sections:
-        if not group:
+    # --- PHASE 3: Markdown Cleanup Phase ---
+    # Read each .md file in the output directory, apply clean_markdown_text() (excluding link conversion)
+    for entry in conversion_log["chapters"]:
+        md_path = output_dir / entry["output_file"]
+        if not md_path.exists():
             continue
-        combined_md = []
-        title = "Untitled"
-        for fname in group:
-            xhtml_path = content_root / fname
-            title = extract_title_from_xhtml(xhtml_path)
-            header = f"## {title}\n\n"
-            md_temp = temp_dir / f"{xhtml_path.stem}.md"
-            run_pandoc(xhtml_path, md_temp)
-            with open(md_temp, "r", encoding="utf-8") as f:
-                raw_md = f.read()
-                md_content = clean_markdown_text(raw_md, chapter_map)
-            combined_md.append(header + md_content)
-            md_temp.unlink()
-        safe_title = safe_filename(title)
-        output_filename = output_dir / f"{label} - {safe_title}.md"
-        output_filename.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_filename, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(combined_md))
-        print(f"Wrote {output_filename.name}")
+        with open(md_path, "r", encoding="utf-8") as f:
+            raw_md = f.read()
+        cleaned_md = clean_markdown_text(raw_md, chapter_map=None)  # Exclude link conversion
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(cleaned_md)
+        print(f"[Phase 3] Cleaned markdown: {entry['output_file']}")
+
+    # --- PHASE 4: Cross-Link Rewriting Phase ---
+    # Replace internal [text](chapter.xhtml#anchor) with Obsidian [[filename#anchor]]
+    for entry in conversion_log["chapters"]:
+        md_path = output_dir / entry["output_file"]
+        if not md_path.exists():
+            continue
+        with open(md_path, "r", encoding="utf-8") as f:
+            raw_md = f.read()
+        cleaned_md = clean_markdown_text(raw_md, chapter_map=chapter_map)
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(cleaned_md)
+        print(f"[Phase 4] Rewrote cross-links in: {entry['output_file']}")
 
     # Generate Obsidian-compatible Table of Contents file
     generate_obsidian_toc(toc_entries, chapter_map, output_dir)
@@ -413,17 +458,18 @@ def main():
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
 
+    return conversion_log
+
 import time
 if __name__ == "__main__":
     start_time = time.time()
-    # To allow show_final_dialog to access conversion_log, must declare as global or return from main
-    # Refactor main() to return conversion_log
-    # But as per instructions, just call main(), then show_final_dialog(conversion_log, ...)
-    # So, move conversion_log to global scope
-    main()
+    # Run main() and capture conversion log
+    log = main()
+    if log is None:
+        log = {}
     elapsed = time.time() - start_time
-    # conversion_log is defined in main() above - must be accessible here.
-    # To allow this, move conversion_log to global, or refactor main to return it.
-    # For this patch, assume conversion_log is global (since main() doesn't return).
-    # So, get conversion_log from global namespace
-    show_final_dialog(globals().get("conversion_log", {}), elapsed, md_status=True, cleanup_status=True, json_status=True)
+    # Show summary dialog with accurate counts
+    show_final_dialog(log, elapsed, md_status=True, cleanup_status=True, json_status=True)
+
+
+        
