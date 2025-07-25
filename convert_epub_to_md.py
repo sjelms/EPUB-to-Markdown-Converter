@@ -2,30 +2,34 @@
 def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
     import re
-    # Remove Pandoc fenced divs
+    # Remove Pandoc fenced divs (e.g., ::: {.class})
     md = re.sub(r'::: ?\{[^}]*\}', '', md)
+    # Remove closing fenced divs (:::)
     md = re.sub(r':::', '', md)
-    # Remove same-file internal anchor links: [text](#anchor)
+    # Remove same-file internal anchor links: [text](#anchor) → text
     md = re.sub(r'\[([^\]]+)\]\(#[^)]+\)', r'\1', md)
 
     # Preserve and optionally reformat cross-file links: [text](chapter3.xhtml#Section2)
     # These are assumed to be converted in a later step or kept as-is for Obsidian
     # No change needed unless formatting is required
-    # Collapse multiple blank lines to a single one
+
+    # Collapse multiple blank lines to a single blank line
     md = re.sub(r'\n{3,}', '\n\n', md)
-    # Optionally: remove lines before first heading
+    # Optionally: remove lines before first heading to clean leading content
     lines = md.strip().splitlines()
     for i, line in enumerate(lines):
         if line.strip().startswith('#'):
             md = '\n'.join(lines[i:])
             break
     # Remove square brackets around citation-style blocks (not links)
+    # Only unwrap if content looks like a citation (e.g., Author (Year))
     md = re.sub(
         r'(?<!\!)\[(.{20,}?)\](?!\()',
         lambda m: m.group(1) if re.search(r'\w+\s+\(\d{4}', m.group(1)) else m.group(0),
         md
     )
     # Convert isolated quotes followed by attribution into block quotes
+    # Matches paragraphs with quotes and attribution on separate lines
     quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
     md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
 
@@ -54,6 +58,7 @@ import argparse
 import subprocess
 from pathlib import Path
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 import zipfile
 import shutil
 import json
@@ -76,12 +81,17 @@ def extract_epub(epub_path: Path, extract_to: Path):
 
 def find_opf_path(container_path: Path) -> Path:
     """Parses container.xml to find the OPF file path."""
-    container_xml = container_path / "META-INF" / "container.xml"
+    container_xml = Path(container_path) / "META-INF" / "container.xml"
     with open(container_xml, 'r', encoding='utf-8') as f:
         soup = BeautifulSoup(f, "xml")
     rootfile = soup.find("rootfile")
-    if rootfile and rootfile.has_attr("full-path"):
-        return container_path / rootfile["full-path"]
+    # Extract the path to the OPF file from the container XML.
+    # Handle edge case where 'full-path' might be returned as a list.
+    if isinstance(rootfile, Tag) and rootfile.has_attr("full-path"):
+        full_path = rootfile["full-path"]
+        if isinstance(full_path, list):
+            full_path = full_path[0]
+        return Path(container_path) / full_path
     else:
         raise ValueError("Could not locate rootfile path in container.xml")
 
@@ -117,26 +127,6 @@ def parse_toc_xhtml(toc_path: Path):
                 file_part, anchor = href, None
             toc_entries.append((file_part, anchor, label))
     return toc_entries
-
-def group_chapter_files(ordered_files):
-    """Groups files like chapter7.xhtml, chapter7a.xhtml, etc. by shared base name."""
-    from collections import defaultdict
-    import re
-
-    # Normalize by stripping suffix like 'a', 'b', 'c' from base name
-    chapter_groups = defaultdict(list)
-    for fname in ordered_files:
-        # Remove path and extension
-        base = Path(fname).stem
-        # Strip trailing letter suffixes (e.g., chapter7a -> chapter7)
-        match = re.match(r"(.*?chapter\d+)", base)
-        if match:
-            group_key = match.group(1)
-        else:
-            group_key = base
-        chapter_groups[group_key].append(fname)
-
-    return list(chapter_groups.values())
 
 def extract_title_from_xhtml(xhtml_path: Path) -> str:
     """Extracts the <title> from an XHTML file."""
@@ -178,6 +168,7 @@ def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
     print(f"TOC written to: {toc_path}")
 
 def main():
+    import re
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
     parser.add_argument("epub_file", type=Path, nargs="?", help="Path to the .epub file")
@@ -221,12 +212,16 @@ def main():
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
 
-    # Extract EPUB contents into temporary folder
+    # Extract EPUB contents into temporary folder for processing
     extract_epub(epub_file, temp_dir)
 
     opf_path = find_opf_path(temp_dir)  # Locate OPF file via container.xml
     content_root = opf_path.parent      # Set root for content folder (usually OEBPS or EPUB)
 
+    from functools import reduce
+    import operator
+
+    # Parse the Table of Contents (toc.xhtml) to obtain ordered chapter files
     toc_file = content_root / "toc.xhtml"  # Look for the navigation file
     if not toc_file.exists():
         print("Error: toc.xhtml not found.")
@@ -252,13 +247,14 @@ def main():
     front_matter = sorted(all_xhtml_files - toc_used)
 
     # --- Automatic back matter detection based on title keywords ---
-    # Detect back matter files using title keywords
+    # Detect back matter files using title keywords to separate from main chapters
     back_keywords = ["references", "glossary", "index"]
     new_toc_xhtml_order = []
     back_matter = []
 
     for file in toc_xhtml_order:
         xhtml_path = content_root / file
+        title = "Untitled"
         title = extract_title_from_xhtml(xhtml_path).lower()
         if any(keyword in title for keyword in back_keywords):
             back_matter.append(file)
@@ -269,29 +265,40 @@ def main():
     toc_used = set(toc_xhtml_order)  # Update used set to exclude back matter
     # --------------------------------------------------------------
 
-    # Build final ordered list with section labels
+    # Build final ordered list with section labels for output filenames
     file_sections = []
 
-    # Front matter: 00a, 00b, etc.
+    # Front matter: label as 00a, 00b, etc.
     for i, fname in enumerate(front_matter):
         label = f"00{chr(ord('a') + i)}"
         file_sections.append((label, [fname]))
 
-    # Chapters from TOC: 01, 02, 03...
-    chapter_groups = group_chapter_files(toc_xhtml_order)
-    for idx, group in enumerate(chapter_groups, start=1):
-        label = f"{idx:02d}"
-        file_sections.append((label, group))
+    # Group XHTML files by chapter titles based on TOC structure
+    title_to_files = {}
+    for file, anchor, label in toc_entries:
+        xhtml_path = content_root / file
+        title = "Untitled"
+        title = extract_title_from_xhtml(xhtml_path)
+        title_to_files.setdefault(title, []).append(file)
 
-    # Back matter: 90, 91, 92, etc.
+    # Assign label numbers by title order
+    title_list = list(title_to_files.keys())
+    chapter_labels = []
+    for idx, title in enumerate(title_list, start=1):
+        label = f"{idx:02d}"
+        file_sections.append((label, title_to_files[title]))
+
+    # Back matter: label as 90, 91, 92, etc.
     for i, fname in enumerate(back_matter):
         label = f"{90 + i}"
         file_sections.append((label, [fname]))
 
+    # Assign output filenames and write initial Markdown files without cross-link cleanup
     for label, group in file_sections:
         if not group:
             continue  # Skip empty groups to avoid unbound title error
         combined_md = []
+        title = "Untitled"
         for fname in group:
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
@@ -305,6 +312,7 @@ def main():
             md_temp.unlink()
 
         output_filename = output_dir / f"{label} - {title}.md"
+        output_filename.parent.mkdir(parents=True, exist_ok=True)
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write("\n\n".join(combined_md))
         print(f"Wrote {output_filename.name}")
@@ -319,14 +327,15 @@ def main():
     print(f"EPUB extracted to: {temp_dir}")
     print(f"Markdown will be saved to: {output_dir}")
 
-    # Build map from XHTML filename to final Markdown filename
+    # Build map from XHTML filename to final Markdown filename for cross-link conversion
     chapter_map = {src: entry["output_file"] for entry in conversion_log["chapters"] for src in entry["source_files"]}
 
-    # Re-run cleanup with chapter_map to convert cross-file links properly
+    # Re-run cleanup with chapter_map to convert cross-file links properly and rewrite files
     for label, group in file_sections:
         if not group:
             continue  # Skip empty groups to avoid unbound title error
         combined_md = []
+        title = "Untitled"
         for fname in group:
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
@@ -340,10 +349,12 @@ def main():
             md_temp.unlink()
 
         output_filename = output_dir / f"{label} - {title}.md"
+        output_filename.parent.mkdir(parents=True, exist_ok=True)
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write("\n\n".join(combined_md))
         print(f"Wrote {output_filename.name}")
 
+    # Generate Obsidian-compatible Table of Contents file
     generate_obsidian_toc(toc_entries, chapter_map, output_dir)
 
     log_path = LOG_DIR / f"{epub_file.stem}.json"  # Path for structured log output
@@ -351,11 +362,22 @@ def main():
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
 
-    # Preview titles for each file in each chapter group
+    # Preview titles for each file in each chapter group for verification
     print("Section titles in each chapter group:")
-    for idx, group in enumerate(chapter_groups, start=1):
-        print(f"  Chapter {idx:02d}:")
-        for fname in group:
+    # We no longer have chapter groups, but can print by chapter number
+    # Collect chapters by base chapter number
+    chapters_dict = {}
+    for label, group in file_sections:
+        base_label = re.match(r"(\d+)", label)
+        if base_label:
+            chap_num = base_label.group(1)
+        else:
+            chap_num = label
+        chapters_dict.setdefault(chap_num, []).extend(group)
+
+    for chap_num in sorted(chapters_dict.keys()):
+        print(f"  Chapter {chap_num}:")
+        for fname in chapters_dict[chap_num]:
             fpath = content_root / fname
             title = extract_title_from_xhtml(fpath)
             print(f"    - {fname} → {title}")
