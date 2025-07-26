@@ -355,7 +355,7 @@ def validate_chapter_groups(chapter_groups, max_expected_chapters=20):
 def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
     """
     Build chapter structure based on XHTML metadata instead of TOC patterns.
-    Returns (chapter_groups, front_matter, back_matter) with proper organization.
+    Returns (chapter_groups, front_matter, backmatter) with proper organization.
     """
     # Extract metadata for all files
     file_metadata = {}
@@ -365,31 +365,56 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
             file_metadata[file] = extract_xhtml_metadata(xhtml_path)
             print(f"[DEBUG] {file}: {file_metadata[file]}")
     
-    # Separate files by type
+    # First pass: identify chapters and build chapter map
+    chapter_map = {}  # Maps chapter number to list of files
     frontmatter_files = []
-    chapter_files = {}
     backmatter_files = []
-    other_files = []
+    level_files = []  # Files with level metadata (subsections)
     
     for file, metadata in file_metadata.items():
         if metadata['is_frontmatter']:
             frontmatter_files.append(file)
         elif metadata['is_chapter']:
             chapter_num = metadata['chapter_number'] or 0
-            if chapter_num not in chapter_files:
-                chapter_files[chapter_num] = []
-            chapter_files[chapter_num].append(file)
+            if chapter_num not in chapter_map:
+                chapter_map[chapter_num] = []
+            chapter_map[chapter_num].append(file)
         elif metadata['is_backmatter']:
             backmatter_files.append(file)
+        elif metadata['level'] is not None:
+            # This is a level-based subsection, we'll assign it to a chapter later
+            level_files.append(file)
         else:
-            other_files.append(file)
+            # Unclassified files
+            frontmatter_files.append(file)
+    
+    # Second pass: assign level-based files to chapters based on TOC order
+    # We need to determine which chapter each level file belongs to
+    if level_files:
+        print(f"[INFO] Found {len(level_files)} level-based files to assign to chapters")
+        
+        # Create a mapping from TOC position to chapter number
+        toc_to_chapter = {}
+        current_chapter = None
+        
+        for file, _, _, _ in toc_entries:
+            if file in chapter_map:
+                # This is a chapter file, update current chapter
+                metadata = file_metadata[file]
+                current_chapter = metadata['chapter_number']
+            elif file in level_files and current_chapter is not None:
+                # This is a level file, assign it to current chapter
+                if current_chapter not in chapter_map:
+                    chapter_map[current_chapter] = []
+                chapter_map[current_chapter].append(file)
+                print(f"[DEBUG] Assigned {file} to chapter {current_chapter}")
     
     # Build chapter groups with proper ordering
     chapter_groups = []
-    sorted_chapters = sorted(chapter_files.keys())
+    sorted_chapters = sorted(chapter_map.keys())
     
     for chapter_num in sorted_chapters:
-        files = chapter_files[chapter_num]
+        files = chapter_map[chapter_num]
         if files:
             # Get the main chapter title (first file in chapter)
             main_file = files[0]
@@ -406,24 +431,6 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
             
             sorted_files = sorted(files, key=sort_key)
             chapter_groups.append((chapter_num, chapter_title, sorted_files))
-    
-    # Handle files that couldn't be classified by metadata
-    if other_files:
-        print(f"[WARNING] {len(other_files)} files could not be classified by metadata:")
-        for f in other_files:
-            print(f"  → {f}: {file_metadata[f]}")
-        
-        # Try to classify based on TOC position and filename patterns
-        for file in other_files:
-            # Check if it looks like frontmatter based on filename
-            if any(pattern in file.lower() for pattern in ['toc', 'contents', 'preface', 'introduction']):
-                frontmatter_files.append(file)
-            # Check if it looks like backmatter
-            elif any(pattern in file.lower() for pattern in ['references', 'index', 'glossary']):
-                backmatter_files.append(file)
-            else:
-                # Default to frontmatter for safety
-                frontmatter_files.append(file)
     
     return chapter_groups, frontmatter_files, backmatter_files
 
@@ -730,7 +737,24 @@ def main():
     # Convert all .xhtml files to temp .md files in a dedicated temp_md_dir
     temp_md_dir = temp_dir / "md"
     temp_md_dir.mkdir(parents=True, exist_ok=True)
-    xhtml_files_for_md = list(all_xhtml_files)
+    
+    # Get all files that need to be converted (including subsections)
+    all_files_to_convert = set()
+    all_files_to_convert.update(all_xhtml_files)  # All XHTML files
+    
+    # Also include any files from chapter groups that might not be in all_xhtml_files
+    for chap_num, chap_title, files in chapter_groups:
+        all_files_to_convert.update(files)
+    
+    # Also include frontmatter and backmatter files
+    all_files_to_convert.update(front_matter)
+    all_files_to_convert.update(back_matter)
+    
+    xhtml_files_for_md = list(all_files_to_convert)
+    print(f"[DEBUG] Files to convert: {len(xhtml_files_for_md)}")
+    for f in sorted(xhtml_files_for_md):
+        print(f"  → {f}")
+    
     # Validation step: Check XHTML files exist before Pandoc conversion
     for xhtml_file in xhtml_files_for_md:
         xhtml_path = content_root / xhtml_file
@@ -738,6 +762,7 @@ def main():
             warning = f"Missing XHTML file: {xhtml_path.name}"
             print(f"Warning: {warning}")
             conversion_log["warnings"].append(warning)
+    
     for xhtml_file in xhtml_files_for_md:
         xhtml_path = content_root / xhtml_file
         md_temp_path = temp_md_dir / f"{Path(xhtml_file).stem}.md"
@@ -820,7 +845,10 @@ def main():
     conversion_log["end_time_utc"] = end_timestamp
     conversion_log["total_output_files"] = len(conversion_log["chapters"])
 
-    log_path = LOG_DIR / f"{epub_file.stem}.json"  # Path for structured log output
+    # Create timestamped log filename
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H.%M")
+    log_path = LOG_DIR / f"{epub_file.stem}_{timestamp}.json"  # Path for structured log output
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
