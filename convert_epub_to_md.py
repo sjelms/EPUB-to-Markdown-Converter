@@ -2,7 +2,6 @@ import re
 
 def title_case(text: str) -> str:
     """Convert text to Title Case (first letter of major words capitalized)."""
-    import re
     
     # Words that should remain lowercase (unless first or last word)
     minor_words = {
@@ -51,7 +50,6 @@ def safe_filename(title: str) -> str:
 #!/usr/bin/env python3
 def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
-    import re
     # Remove Pandoc fenced divs (e.g., ::: {.class})
     md = re.sub(r'::: ?\{[^}]*\}', '', md)
     # Remove closing fenced divs (:::)
@@ -167,6 +165,7 @@ def run_pandoc(input_file: Path, output_file: Path):
 def parse_toc_xhtml(toc_path: Path):
     """Parses toc.xhtml and returns a list of (filename, anchor, label, depth) in TOC order."""
     from bs4 import BeautifulSoup
+    from bs4.element import Tag
     with open(toc_path, 'r', encoding='utf-8') as f:
         soup = BeautifulSoup(f, 'xml')  # Use strict XML parsing
 
@@ -175,36 +174,63 @@ def parse_toc_xhtml(toc_path: Path):
     def process_ol(ol_tag, depth=1):
         for li in ol_tag.find_all('li', recursive=False):
             a_tag = li.find('a', href=True)
-            if a_tag:
-                href = a_tag['href']
+            if a_tag and isinstance(a_tag, Tag):
+                href = a_tag.get('href', '')
+                if isinstance(href, list):
+                    href = href[0] if href else ''
                 label = a_tag.get_text(strip=True)
-                if '.xhtml' in href:
+                if href and '.xhtml' in href:
                     if '#' in href:
                         file_part, anchor = href.split('#', 1)
                     else:
                         file_part, anchor = href, None
                     toc_entries.append((file_part, anchor, label, depth))
             nested_ol = li.find('ol', recursive=False)
-            if nested_ol:
+            if nested_ol and isinstance(nested_ol, Tag):
                 process_ol(nested_ol, depth + 1)
 
     nav = soup.find('nav')
-    if nav:
+    if nav and isinstance(nav, Tag):
         ol = nav.find('ol')
-        if ol:
+        if ol and isinstance(ol, Tag):
             process_ol(ol)
     else:
         # fallback to flat structure
         for a in soup.find_all('a', href=True):
-            href = a['href']
-            label = a.get_text(strip=True)
-            if '.xhtml' in href:
-                if '#' in href:
-                    file_part, anchor = href.split('#', 1)
-                else:
-                    file_part, anchor = href, None
-                toc_entries.append((file_part, anchor, label, 1))
+            if isinstance(a, Tag):
+                href = a.get('href', '')
+                if isinstance(href, list):
+                    href = href[0] if href else ''
+                label = a.get_text(strip=True)
+                if href and '.xhtml' in href:
+                    if '#' in href:
+                        file_part, anchor = href.split('#', 1)
+                    else:
+                        file_part, anchor = href, None
+                    toc_entries.append((file_part, anchor, label, 1))
     return toc_entries
+
+def extract_book_title_from_copyright(content_root: Path) -> str | None:
+    """Extract the book title from copyright statement using RNIB_COPYRIGHT_LEGALESE_0 ID."""
+    # Look for copyright statement in all XHTML files
+    for xhtml_file in content_root.glob("*.xhtml"):
+        try:
+            with open(xhtml_file, 'r', encoding='utf-8') as f:
+                soup = BeautifulSoup(f, 'xml')
+            
+            # Look for the copyright title element
+            copyright_title = soup.find('p', id='RNIB_COPYRIGHT_LEGALESE_0')
+            if copyright_title:
+                title = copyright_title.get_text(strip=True)
+                if title and title != "":
+                    print(f"[INFO] Found book title from copyright: {title}")
+                    return title
+        except Exception as e:
+            print(f"[WARNING] Error reading {xhtml_file}: {e}")
+            continue
+    
+    print("[WARNING] Could not find book title in copyright statement")
+    return None
 
 def extract_title_from_xhtml(xhtml_path: Path) -> str:
     """Extracts the <title> from an XHTML file and converts to Title Case."""
@@ -409,7 +435,14 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
         xhtml_path = content_root / file
         if xhtml_path.exists():
             file_metadata[file] = extract_xhtml_metadata(xhtml_path)
-            print(f"[DEBUG] {file}: {file_metadata[file]}")
+        else:
+            print(f"[WARNING] XHTML file not found: {xhtml_path}")
+    
+    # Also check all XHTML files in content_root, not just TOC entries
+    all_xhtml_files = list(content_root.glob("*.xhtml"))
+    for xhtml_file in all_xhtml_files:
+        if xhtml_file.name not in file_metadata:
+            file_metadata[xhtml_file.name] = extract_xhtml_metadata(xhtml_file)
     
     # First pass: identify chapters and build chapter map
     chapter_map = {}  # Maps chapter number to list of files
@@ -437,9 +470,7 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
     # Second pass: assign level-based files to chapters based on TOC order
     # We need to determine which chapter each level file belongs to
     if level_files:
-        print(f"[INFO] Found {len(level_files)} level-based files to assign to chapters:")
-        for f in level_files:
-            print(f"  → {f}: {file_metadata[f]}")
+        print(f"[INFO] Found {len(level_files)} level-based files to assign to chapters")
         
         # Create a mapping from TOC position to chapter number
         current_chapter = None
@@ -449,13 +480,11 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
                 # This is a chapter file, update current chapter
                 metadata = file_metadata[file]
                 current_chapter = metadata['chapter_number']
-                print(f"[DEBUG] Found chapter file {file}, current_chapter = {current_chapter}")
             elif file in level_files and current_chapter is not None:
                 # This is a level file, assign it to current chapter
                 if current_chapter not in chapter_map:
                     chapter_map[current_chapter] = []
                 chapter_map[current_chapter].append(file)
-                print(f"[DEBUG] Assigned {file} to chapter {current_chapter}")
             elif file in level_files:
                 print(f"[WARNING] Level file {file} found before any chapter, cannot assign")
     
@@ -477,16 +506,13 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
                     if closest_chapter not in chapter_map:
                         chapter_map[closest_chapter] = []
                     chapter_map[closest_chapter].append(file)
-                    print(f"[DEBUG] Assigned {file} to closest chapter {closest_chapter}")
                     break
     
     # Debug output of final chapter groups
-    print(f"\n[DEBUG] Final chapter groups:")
+    print(f"\n[INFO] Final chapter groups:")
     for chapter_num in sorted(chapter_map.keys()):
         files = chapter_map[chapter_num]
         print(f"  Chapter {chapter_num}: {len(files)} files")
-        for f in files:
-            print(f"    → {f}")
     
     # Build chapter groups with proper ordering
     chapter_groups = []
@@ -631,17 +657,15 @@ def main():
     epub_abs_path = str(epub_file.resolve())
     SCRIPT_VERSION = "v0.9.0-beta"
 
-    output_dir = OUTPUT_ROOT / epub_file.stem  # Create folder named after EPUB file
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     from datetime import datetime
     start_timestamp = datetime.utcnow().isoformat() + "Z"
 
     images_src = None  # will be set before use
+    # Initialize conversion_log without output_dir (will be updated later)
     conversion_log = {
         "epub": epub_file.name,
         "epub_path": epub_abs_path,
-        "output_dir": str(output_dir),
+        "output_dir": "",  # Will be updated after output_dir is determined
         "start_time_utc": start_timestamp,
         "images_moved": False,
         "script_version": SCRIPT_VERSION,
@@ -688,6 +712,24 @@ def main():
     
     content_root = actual_content_root
     print(f"[INFO] Using content root: {content_root}")
+
+    # Extract book title from copyright statement
+    book_title = extract_book_title_from_copyright(content_root)
+    if book_title:
+        # Use book title for folder name, sanitize it
+        safe_book_title = safe_filename(book_title)
+        output_dir = OUTPUT_ROOT / safe_book_title
+        print(f"[INFO] Using book title for folder: {safe_book_title}")
+    else:
+        # Fallback to EPUB filename
+        output_dir = OUTPUT_ROOT / epub_file.stem
+        print(f"[INFO] Using EPUB filename for folder: {epub_file.stem}")
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Update conversion_log with the correct output_dir and book title
+    conversion_log["output_dir"] = str(output_dir)
+    conversion_log["book_title"] = book_title if book_title else epub_file.stem
 
     # Copy images directory if present
     images_src = content_root / "images"
@@ -927,7 +969,12 @@ def main():
     # Create timestamped log filename
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y-%m-%d_%H.%M")
-    log_path = LOG_DIR / f"{epub_file.stem}_{timestamp}.json"  # Path for structured log output
+    # Use book title for log filename if available, otherwise use EPUB filename
+    if book_title:
+        safe_log_title = safe_filename(book_title)
+        log_path = LOG_DIR / f"{safe_log_title}_{timestamp}.json"
+    else:
+        log_path = LOG_DIR / f"{epub_file.stem}_{timestamp}.json"
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
