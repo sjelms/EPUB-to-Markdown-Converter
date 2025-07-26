@@ -169,6 +169,264 @@ def extract_title_from_xhtml(xhtml_path: Path) -> str:
     title_tag = soup.find('title')
     return title_tag.get_text(strip=True) if title_tag else "Untitled"
 
+def extract_xhtml_metadata(xhtml_path: Path) -> dict:
+    """
+    Extract comprehensive metadata from XHTML file including:
+    - title
+    - body type (frontmatter, bodymatter, backmatter)
+    - section id and type
+    - chapter information
+    """
+    with open(xhtml_path, 'r', encoding='utf-8') as f:
+        soup = BeautifulSoup(f, 'xml')
+    
+    metadata = {
+        'title': "Untitled",
+        'body_type': None,
+        'section_id': None,
+        'section_type': None,
+        'is_frontmatter': False,
+        'is_chapter': False,
+        'is_backmatter': False,
+        'chapter_number': None,
+        'level': None,
+        'subsection_number': None
+    }
+    
+    # Extract title
+    title_tag = soup.find('title')
+    if title_tag:
+        metadata['title'] = title_tag.get_text(strip=True)
+    
+    # Extract body type
+    body_tag = soup.find('body')
+    if body_tag and isinstance(body_tag, Tag):
+        metadata['body_type'] = body_tag.get('epub:type')
+    
+    # Extract section information
+    section_tag = soup.find('section')
+    if section_tag and isinstance(section_tag, Tag):
+        metadata['section_id'] = section_tag.get('id')
+        metadata['section_type'] = section_tag.get('epub:type')
+    
+    # Determine content type based on metadata
+    section_id = str(metadata['section_id'] or "")
+    body_type = str(metadata['body_type'] or "")
+    section_type = str(metadata['section_type'] or "")
+    title_upper = metadata['title'].upper()
+    
+    # Frontmatter detection (comprehensive)
+    if (body_type == "frontmatter" or 
+        section_id.startswith("frontmatter_") or
+        section_id.startswith("page_") or  # Roman numeral pages
+        "titlepage" in section_type or
+        "toc" in section_type or
+        "preface" in section_id.lower() or
+        "acknowledgements" in section_id.lower() or
+        "abouttheauthors" in section_id.lower() or
+        "introduction" in section_id.lower() or
+        title_upper in ["CONTENTS", "ACKNOWLEDGEMENTS", "ABOUT THE AUTHORS", "INTRODUCTION"]):
+        metadata['is_frontmatter'] = True
+    
+    # Chapter detection (comprehensive)
+    elif (section_id.startswith("ch") or
+          section_id.startswith("chapter") or
+          section_id.startswith("Sec") or  # Springer format
+          section_type == "chapter" or
+          (title_upper and "CHAPTER" in title_upper)):
+        metadata['is_chapter'] = True
+        # Extract chapter number from various formats
+        if section_id.startswith("ch"):
+            try:
+                metadata['chapter_number'] = int(section_id[2:])
+            except ValueError:
+                pass
+        elif section_id.startswith("chapter"):
+            try:
+                metadata['chapter_number'] = int(section_id[7:])
+            except ValueError:
+                pass
+        elif section_id.startswith("Sec"):
+            try:
+                metadata['chapter_number'] = int(section_id[3:])
+            except ValueError:
+                pass
+        # Extract from title if section_id doesn't have number
+        elif "CHAPTER" in title_upper:
+            import re
+            match = re.search(r'CHAPTER\s+(\d+)', title_upper)
+            if match:
+                try:
+                    metadata['chapter_number'] = int(match.group(1))
+                except ValueError:
+                    pass
+    
+    # Level detection within chapters (comprehensive)
+    elif section_id.startswith("level"):
+        parts = section_id.split("_")
+        if len(parts) >= 2:
+            level_part = parts[0]
+            if level_part.startswith("level"):
+                try:
+                    metadata['level'] = int(level_part[5:])
+                    # Extract subsection number from the second part
+                    if len(parts) >= 2:
+                        try:
+                            metadata['subsection_number'] = int(parts[1])
+                        except ValueError:
+                            pass
+                except ValueError:
+                    pass
+    
+    # Backmatter detection (comprehensive)
+    elif (section_id in ["references", "index", "glossary", "bibliography"] or
+          title_upper in ["REFERENCES", "INDEX", "GLOSSARY", "BIBLIOGRAPHY", "CONCLUSION"] or
+          "references" in section_id.lower() or
+          "index" in section_id.lower()):
+        metadata['is_backmatter'] = True
+    
+    return metadata
+
+def is_chapter_boundary(title: str, label: str) -> bool:
+    """
+    Determine if a TOC entry represents a new chapter boundary.
+    Returns True if this should start a new chapter group.
+    """
+    import re
+    title_upper = title.upper()
+    label_upper = label.upper()
+    
+    # Primary patterns for chapter detection
+    chapter_patterns = [
+        r'^CHAPTER\s+\d+',           # "CHAPTER 1", "CHAPTER 2"
+        r'^SECTION\s+\d+',           # "SECTION 1", "SECTION 2" 
+        r'^PART\s+\d+',              # "PART 1", "PART 2"
+        r'^\d+\.\s+[A-Z]',           # "1. INTRODUCTION", "2. METHODS"
+        r'^[A-Z][A-Z\s]{10,}$',      # Long all-caps titles (likely chapters)
+        r'^INTRODUCTION$',            # Common chapter title
+        r'^CONCLUSION$',              # Common chapter title
+        r'^\d+\s*[-–]\s*[A-Z]',      # "1 - TITLE" format
+        r'^APPENDIX\s*[A-Z]?$',      # "APPENDIX A", "APPENDIX"
+        r'^BIBLIOGRAPHY$',           # Common back matter
+        r'^REFERENCES$',              # Common back matter
+        r'^GLOSSARY$',                # Common back matter
+        r'^INDEX$'                    # Common back matter
+    ]
+    
+    # Check title patterns
+    for pattern in chapter_patterns:
+        if re.match(pattern, title_upper):
+            return True
+        if re.match(pattern, label_upper):
+            return True
+    
+    # Additional heuristics
+    if len(title_upper) > 50 and title_upper.isupper():
+        return True  # Very long uppercase titles are likely chapters
+        
+    return False
+
+def validate_chapter_groups(chapter_groups, max_expected_chapters=20):
+    """
+    Validate chapter grouping results and apply fallbacks if needed.
+    If we detect too many single-file chapters, apply alternative grouping.
+    """
+    single_file_chapters = sum(1 for _, _, files in chapter_groups if len(files) == 1)
+    total_chapters = len(chapter_groups)
+    
+    # Check for over-grouping (chapters with too many files)
+    oversized_chapters = sum(1 for _, _, files in chapter_groups if len(files) > 10)
+    
+    # If more than 70% are single-file chapters and we have many chapters, 
+    # this suggests our detection failed
+    if total_chapters > max_expected_chapters or (single_file_chapters / total_chapters) > 0.7:
+        print(f"[WARNING] Detected {total_chapters} chapters with {single_file_chapters} single-file chapters")
+        print("[WARNING] This suggests chapter detection may have failed")
+        return False
+    
+    # If we have oversized chapters, that's also concerning
+    if oversized_chapters > 0:
+        print(f"[WARNING] Detected {oversized_chapters} chapters with more than 10 files")
+        print("[WARNING] This suggests over-grouping may have occurred")
+        return False
+    
+    return True
+
+def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
+    """
+    Build chapter structure based on XHTML metadata instead of TOC patterns.
+    Returns (chapter_groups, front_matter, back_matter) with proper organization.
+    """
+    # Extract metadata for all files
+    file_metadata = {}
+    for file, _, _, _ in toc_entries:
+        xhtml_path = content_root / file
+        if xhtml_path.exists():
+            file_metadata[file] = extract_xhtml_metadata(xhtml_path)
+            print(f"[DEBUG] {file}: {file_metadata[file]}")
+    
+    # Separate files by type
+    frontmatter_files = []
+    chapter_files = {}
+    backmatter_files = []
+    other_files = []
+    
+    for file, metadata in file_metadata.items():
+        if metadata['is_frontmatter']:
+            frontmatter_files.append(file)
+        elif metadata['is_chapter']:
+            chapter_num = metadata['chapter_number'] or 0
+            if chapter_num not in chapter_files:
+                chapter_files[chapter_num] = []
+            chapter_files[chapter_num].append(file)
+        elif metadata['is_backmatter']:
+            backmatter_files.append(file)
+        else:
+            other_files.append(file)
+    
+    # Build chapter groups with proper ordering
+    chapter_groups = []
+    sorted_chapters = sorted(chapter_files.keys())
+    
+    for chapter_num in sorted_chapters:
+        files = chapter_files[chapter_num]
+        if files:
+            # Get the main chapter title (first file in chapter)
+            main_file = files[0]
+            main_metadata = file_metadata[main_file]
+            chapter_title = main_metadata['title']
+            
+            # Sort files within chapter by level and subsection number
+            def sort_key(f):
+                meta = file_metadata[f]
+                level = meta.get('level', 999)  # Default high level for sorting
+                subsection = meta.get('subsection_number', 999)  # Default high subsection
+                # Primary sort by level, secondary by subsection number
+                return (level, subsection)
+            
+            sorted_files = sorted(files, key=sort_key)
+            chapter_groups.append((chapter_num, chapter_title, sorted_files))
+    
+    # Handle files that couldn't be classified by metadata
+    if other_files:
+        print(f"[WARNING] {len(other_files)} files could not be classified by metadata:")
+        for f in other_files:
+            print(f"  → {f}: {file_metadata[f]}")
+        
+        # Try to classify based on TOC position and filename patterns
+        for file in other_files:
+            # Check if it looks like frontmatter based on filename
+            if any(pattern in file.lower() for pattern in ['toc', 'contents', 'preface', 'introduction']):
+                frontmatter_files.append(file)
+            # Check if it looks like backmatter
+            elif any(pattern in file.lower() for pattern in ['references', 'index', 'glossary']):
+                backmatter_files.append(file)
+            else:
+                # Default to frontmatter for safety
+                frontmatter_files.append(file)
+    
+    return chapter_groups, frontmatter_files, backmatter_files
+
 # === CLI ===
 
 def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
@@ -321,6 +579,29 @@ def main():
 
     opf_path = find_opf_path(temp_dir)  # Locate OPF file via container.xml
     content_root = opf_path.parent      # Set root for content folder (usually OEBPS or EPUB)
+    
+    # Handle different EPUB folder structures
+    # Some EPUBs have XHTML files directly in OEBPS/, others in OEBPS/html/
+    potential_content_roots = [
+        content_root,  # OEBPS/ or EPUB/
+        content_root / "html",  # OEBPS/html/
+        content_root / "EPUB",  # OEBPS/EPUB/
+    ]
+    
+    # Find the folder that contains XHTML files
+    actual_content_root = None
+    for root in potential_content_roots:
+        if root.exists() and any(root.glob("*.xhtml")):
+            actual_content_root = root
+            break
+    
+    if actual_content_root is None:
+        # Fallback: use the original content_root
+        actual_content_root = content_root
+        print(f"[WARNING] Could not find XHTML files in expected locations, using: {content_root}")
+    
+    content_root = actual_content_root
+    print(f"[INFO] Using content root: {content_root}")
 
     # Copy images directory if present
     images_src = content_root / "images"
@@ -349,9 +630,9 @@ def main():
     toc_xhtml_files = [file for file, _, _, _ in toc_entries]
     toc_used = set(toc_xhtml_files)
 
-    # Front matter: files not referenced in TOC
-    front_matter = sorted(all_xhtml_files - toc_used)
-    conversion_log["unlinked_files"] = sorted(list(front_matter))
+    # Front matter: files not referenced in TOC (will be overridden by metadata-driven structure)
+    old_front_matter = sorted(all_xhtml_files - toc_used)
+    conversion_log["unlinked_files"] = sorted(list(old_front_matter))
 
     # --- Automatic back matter detection based on title keywords ---
     back_keywords = ["references", "glossary", "index"]
@@ -369,42 +650,46 @@ def main():
     toc_main_entries = filtered_toc_main_entries
     # --------------------------------------------------------------
 
-    # === CHAPTER GROUPING (NEW LOGIC) ===
-    # Group TOC entries by depth==1 as chapter headers, with depth>1 as sub-sections.
-    # This logic ensures chapters and their subsections are mapped using decimal labels (e.g., 01.0, 01.1, ...).
-    # Front matter and back matter are handled distinctly and labeled accordingly.
-    chapter_groups = []  # List of (chapter_number, chapter_title, [file1, file2, ...])
-    current_group = []
-    chapter_num = 1
-    chapter_title = None
-
-    for entry in toc_main_entries:
-        file, anchor, label, depth = entry
-        xhtml_path = content_root / file
-        title = extract_title_from_xhtml(xhtml_path)
-        if depth == 1:
-            # If we already collected a group, store it as a chapter
-            if current_group:
-                chapter_groups.append((chapter_num, chapter_title, current_group))
-                chapter_num += 1
-            chapter_title = title
-            current_group = [file]
-        else:
-            current_group.append(file)
-
-    # Append last group if exists
-    if current_group:
-        chapter_groups.append((chapter_num, chapter_title, current_group))
-
-    # Debug output of chapter groups
-    print("\n--- DEBUG: Chapter Groups ---")
-    for group in chapter_groups:
-        print(group)
+    # === CHAPTER GROUPING (METADATA-DRIVEN) ===
+    # Use XHTML metadata (body type, section id, etc.) to determine proper structure
+    # This is more reliable than TOC pattern matching
+    print("\n=== BUILDING METADATA-DRIVEN STRUCTURE ===")
+    chapter_groups, front_matter, back_matter = build_metadata_driven_structure(toc_main_entries, content_root)
+    
+    # Enhanced debug output
+    print("\n=== METADATA-DRIVEN STRUCTURE RESULTS ===")
+    print(f"Front matter files: {len(front_matter)}")
+    for f in front_matter:
+        print(f"  → {f}")
+    
+    print(f"\nChapters: {len(chapter_groups)}")
+    for chapter_num, title, files in chapter_groups:
+        print(f"Chapter {chapter_num:02d}: {title}")
+        for j, file in enumerate(files):
+            label = f"{chapter_num:02d}.{j}" if j > 0 else f"{chapter_num:02d}.0"
+            print(f"  → {label} - {file}")
+    
+    print(f"\nBack matter files: {len(back_matter)}")
+    for f in back_matter:
+        print(f"  → {f}")
+    
+    print("=" * 50)
 
     conversion_log["chapter_groups"] = [
         {"chapter_num": f"{num:02d}", "title": title, "files": group}
         for num, title, group in chapter_groups
     ]
+    
+    # Add chapter grouping metadata for debugging
+    conversion_log["chapter_grouping_metadata"] = {
+        "total_chapters": len(chapter_groups),
+        "single_file_chapters": sum(1 for _, _, files in chapter_groups if len(files) == 1),
+        "multi_file_chapters": sum(1 for _, _, files in chapter_groups if len(files) > 1),
+        "max_files_per_chapter": max(len(files) for _, _, files in chapter_groups) if chapter_groups else 0,
+        "avg_files_per_chapter": sum(len(files) for _, _, files in chapter_groups) / len(chapter_groups) if chapter_groups else 0,
+        "content_root_used": str(content_root),
+        "epub_structure_type": "OEBPS/html" if "html" in str(content_root) else "OEBPS" if "OEBPS" in str(content_root) else "EPUB" if "EPUB" in str(content_root) else "Unknown"
+    }
 
     # === ASSIGN LABELS ===
     # chapter_index_map maps each file to its decimal chapter/subsection label (e.g., 01.0, 01.1, ...)

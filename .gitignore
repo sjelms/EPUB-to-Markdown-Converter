@@ -126,6 +126,9 @@ dmypy.json
 # VS Code / Cursor workspace files
 *.code-workspace
 
+# Helper context folder (troubleshooting docs)
+/helper_context
+
 # macOS Finder metadata
 .DS_Store
 .AppleDouble
