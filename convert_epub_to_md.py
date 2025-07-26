@@ -10,6 +10,10 @@ def title_case(text: str) -> str:
         'during', 'before', 'after', 'above', 'below', 'between', 'among', 'within', 'without'
     }
     
+    # If text is all uppercase, convert to title case first
+    if text.isupper():
+        text = text.title()
+    
     # Split into words and process each
     words = text.split()
     if not words:
@@ -247,6 +251,9 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
     - body type (frontmatter, bodymatter, backmatter)
     - section id and type
     - chapter information
+    
+    ENHANCED: Now searches for IDs on ANY tag within the body, not just section/div tags.
+    This fixes the subsection detection issue where level IDs are placed on h1, h2, p tags, etc.
     """
     with open(xhtml_path, 'r', encoding='utf-8') as f:
         soup = BeautifulSoup(f, 'xml')
@@ -270,16 +277,22 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
         raw_title = title_tag.get_text(strip=True)
         metadata['title'] = title_case(raw_title)
     
-    # Extract body type
+    # Extract body type from body tag
     body_tag = soup.find('body')
     if body_tag and isinstance(body_tag, Tag):
         metadata['body_type'] = body_tag.get('epub:type')
     
-    # Extract section information
-    section_tag = soup.find('section')
-    if section_tag and isinstance(section_tag, Tag):
-        metadata['section_id'] = section_tag.get('id')
-        metadata['section_type'] = section_tag.get('epub:type')
+    # --- ENHANCED SECTION ID DETECTION ---
+    # Find the first tag in the body that has an ID attribute. This is more robust.
+    # This fixes the issue where level IDs (like level1_000001) are placed on various tags
+    # (h1, h2, p, etc.) rather than just section or div tags.
+    tag_with_id = None
+    if body_tag and isinstance(body_tag, Tag):
+        tag_with_id = body_tag.find(id=True)
+    if tag_with_id and isinstance(tag_with_id, Tag):
+        metadata['section_id'] = tag_with_id.get('id')
+        metadata['section_type'] = tag_with_id.get('epub:type')
+    # --- END ENHANCED SECTION ---
     
     # Determine content type based on metadata
     section_id = str(metadata['section_id'] or "")
@@ -307,25 +320,30 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
           section_type == "chapter" or
           (title_upper and "CHAPTER" in title_upper)):
         metadata['is_chapter'] = True
-        # Extract chapter number from various formats
+        # Extract chapter number from various formats using regex for better reliability
         if section_id.startswith("ch"):
             try:
-                metadata['chapter_number'] = int(section_id[2:])
-            except ValueError:
+                match = re.search(r'\d+', section_id)
+                if match:
+                    metadata['chapter_number'] = int(match.group())
+            except (ValueError, AttributeError):
                 pass
         elif section_id.startswith("chapter"):
             try:
-                metadata['chapter_number'] = int(section_id[7:])
-            except ValueError:
+                match = re.search(r'\d+', section_id)
+                if match:
+                    metadata['chapter_number'] = int(match.group())
+            except (ValueError, AttributeError):
                 pass
         elif section_id.startswith("Sec"):
             try:
-                metadata['chapter_number'] = int(section_id[3:])
-            except ValueError:
+                match = re.search(r'\d+', section_id)
+                if match:
+                    metadata['chapter_number'] = int(match.group())
+            except (ValueError, AttributeError):
                 pass
         # Extract from title if section_id doesn't have number
         elif "CHAPTER" in title_upper:
-            import re
             match = re.search(r'CHAPTER\s+(\d+)', title_upper)
             if match:
                 try:
@@ -334,6 +352,7 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
                     pass
     
     # Level detection within chapters (comprehensive)
+    # ENHANCED: More robust regex parsing to handle variations in level ID formats
     elif section_id.startswith("level"):
         parts = section_id.split("_")
         if len(parts) >= 2:
@@ -341,17 +360,20 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
             if level_part.startswith("level"):
                 try:
                     metadata['level'] = int(level_part[5:])
-                    # Extract subsection number from the second part
+                    # Extract subsection number from the second part using regex
                     if len(parts) >= 2:
                         try:
-                            metadata['subsection_number'] = int(parts[1])
-                        except ValueError:
+                            # Use regex to find number in case of extra chars
+                            match = re.search(r'\d+', parts[1])
+                            if match:
+                                metadata['subsection_number'] = int(match.group())
+                        except (ValueError, AttributeError):
                             pass
-                except ValueError:
+                except (ValueError, AttributeError):
                     pass
     
     # Backmatter detection (comprehensive)
-    elif (section_id in ["references", "index", "glossary", "bibliography"] or
+    elif (section_id in ["references", "index", "glossary", "bibliography", "conclusion"] or
           title_upper in ["REFERENCES", "INDEX", "GLOSSARY", "BIBLIOGRAPHY", "CONCLUSION"] or
           "references" in section_id.lower() or
           "index" in section_id.lower()):
@@ -435,6 +457,7 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
         xhtml_path = content_root / file
         if xhtml_path.exists():
             file_metadata[file] = extract_xhtml_metadata(xhtml_path)
+            print(f"[DEBUG] {file}: section_id='{file_metadata[file]['section_id']}', level={file_metadata[file]['level']}")
         else:
             print(f"[WARNING] XHTML file not found: {xhtml_path}")
     
@@ -443,6 +466,7 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
     for xhtml_file in all_xhtml_files:
         if xhtml_file.name not in file_metadata:
             file_metadata[xhtml_file.name] = extract_xhtml_metadata(xhtml_file)
+            print(f"[DEBUG] {xhtml_file.name}: section_id='{file_metadata[xhtml_file.name]['section_id']}', level={file_metadata[xhtml_file.name]['level']}")
     
     # First pass: identify chapters and build chapter map
     chapter_map = {}  # Maps chapter number to list of files
@@ -754,6 +778,14 @@ def main():
 
     # List all xhtml files in content_root
     all_xhtml_files = {f.name for f in (content_root).glob("*.xhtml")}
+    
+    # --- FIX: Explicitly remove toc.xhtml so it is not processed as content ---
+    # This prevents the duplicate TOC file issue where toc.xhtml gets converted to Markdown
+    # and creates a second TOC file alongside our generated one.
+    all_xhtml_files.discard("toc.xhtml")
+    print(f"[INFO] Excluded toc.xhtml from content processing to prevent duplicate TOC files")
+    # --- END FIX ---
+    
     conversion_log["xhtml_files_in_epub"] = sorted(list(all_xhtml_files))
     toc_xhtml_files = [file for file, _, _, _ in toc_entries]
     toc_used = set(toc_xhtml_files)
@@ -958,7 +990,14 @@ def main():
         print(f"[Phase 4] Rewrote cross-links in: {entry['output_file']}")
 
     # Generate Obsidian-compatible Table of Contents file
-    generate_obsidian_toc(toc_entries, chapter_map, output_dir)
+    # This creates the main TOC file with proper Obsidian links
+    # The toc.xhtml file has been excluded from content processing above to prevent duplicates
+    toc_path = output_dir / "00 - Table of Contents.md"
+    if not toc_path.exists():
+        generate_obsidian_toc(toc_entries, chapter_map, output_dir)
+        print(f"[INFO] Generated Obsidian-compatible TOC: {toc_path}")
+    else:
+        print(f"[INFO] TOC file already exists, skipping generation")
 
     # Add runtime metadata before writing log
     from datetime import datetime
