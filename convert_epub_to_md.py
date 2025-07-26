@@ -1,8 +1,52 @@
 import re
 
+def title_case(text: str) -> str:
+    """Convert text to Title Case (first letter of major words capitalized)."""
+    import re
+    
+    # Words that should remain lowercase (unless first or last word)
+    minor_words = {
+        'a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'if', 'in', 'is', 'it', 'no', 'nor', 
+        'of', 'on', 'or', 'so', 'the', 'to', 'up', 'yet', 'with', 'from', 'into', 'through', 
+        'during', 'before', 'after', 'above', 'below', 'between', 'among', 'within', 'without'
+    }
+    
+    # Split into words and process each
+    words = text.split()
+    if not words:
+        return text
+    
+    result = []
+    for i, word in enumerate(words):
+        # Clean the word (remove punctuation for processing)
+        clean_word = re.sub(r'[^\w]', '', word.lower())
+        
+        # Capitalize if:
+        # 1. It's the first or last word
+        # 2. It's not a minor word
+        # 3. It's longer than 3 characters (to catch important short words)
+        should_capitalize = (
+            i == 0 or i == len(words) - 1 or  # First or last word
+            clean_word not in minor_words or  # Not a minor word
+            len(clean_word) > 3  # Longer than 3 characters
+        )
+        
+        if should_capitalize:
+            # Capitalize the first letter, preserve original case for rest
+            if word:
+                result.append(word[0].upper() + word[1:])
+            else:
+                result.append(word)
+        else:
+            # Keep minor words lowercase
+            result.append(word.lower())
+    
+    return ' '.join(result)
+
 # Helper function to sanitize titles for filenames
 def safe_filename(title: str) -> str:
     """Sanitize title for use as a filename (prevent subfolders or illegal characters)."""
+    # Convert colons to hyphens and remove other problematic characters
     return re.sub(r'[\\/:"*?<>|]', '-', title)
 #!/usr/bin/env python3
 def clean_markdown_text(md: str, chapter_map=None) -> str:
@@ -163,11 +207,12 @@ def parse_toc_xhtml(toc_path: Path):
     return toc_entries
 
 def extract_title_from_xhtml(xhtml_path: Path) -> str:
-    """Extracts the <title> from an XHTML file."""
+    """Extracts the <title> from an XHTML file and converts to Title Case."""
     with open(xhtml_path, 'r', encoding='utf-8') as f:
         soup = BeautifulSoup(f, 'xml')  # Use strict XML parsing
     title_tag = soup.find('title')
-    return title_tag.get_text(strip=True) if title_tag else "Untitled"
+    raw_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
+    return title_case(raw_title)
 
 def extract_xhtml_metadata(xhtml_path: Path) -> dict:
     """
@@ -196,7 +241,8 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
     # Extract title
     title_tag = soup.find('title')
     if title_tag:
-        metadata['title'] = title_tag.get_text(strip=True)
+        raw_title = title_tag.get_text(strip=True)
+        metadata['title'] = title_case(raw_title)
     
     # Extract body type
     body_tag = soup.find('body')
@@ -391,10 +437,11 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
     # Second pass: assign level-based files to chapters based on TOC order
     # We need to determine which chapter each level file belongs to
     if level_files:
-        print(f"[INFO] Found {len(level_files)} level-based files to assign to chapters")
+        print(f"[INFO] Found {len(level_files)} level-based files to assign to chapters:")
+        for f in level_files:
+            print(f"  → {f}: {file_metadata[f]}")
         
         # Create a mapping from TOC position to chapter number
-        toc_to_chapter = {}
         current_chapter = None
         
         for file, _, _, _ in toc_entries:
@@ -402,12 +449,44 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
                 # This is a chapter file, update current chapter
                 metadata = file_metadata[file]
                 current_chapter = metadata['chapter_number']
+                print(f"[DEBUG] Found chapter file {file}, current_chapter = {current_chapter}")
             elif file in level_files and current_chapter is not None:
                 # This is a level file, assign it to current chapter
                 if current_chapter not in chapter_map:
                     chapter_map[current_chapter] = []
                 chapter_map[current_chapter].append(file)
                 print(f"[DEBUG] Assigned {file} to chapter {current_chapter}")
+            elif file in level_files:
+                print(f"[WARNING] Level file {file} found before any chapter, cannot assign")
+    
+    # Additional pass: handle level files that might be in separate files
+    # Some EPUBs have subsections as separate XHTML files with level anchors
+    for file, metadata in file_metadata.items():
+        if (metadata['level'] is not None and 
+            file not in [f for files in chapter_map.values() for f in files] and
+            file not in frontmatter_files and 
+            file not in backmatter_files):
+            
+            # Try to find the closest chapter before this file in TOC order
+            closest_chapter = None
+            for toc_file, _, _, _ in toc_entries:
+                if toc_file in chapter_map:
+                    closest_chapter = file_metadata[toc_file]['chapter_number']
+                elif toc_file == file and closest_chapter is not None:
+                    # This level file comes after a chapter, assign it
+                    if closest_chapter not in chapter_map:
+                        chapter_map[closest_chapter] = []
+                    chapter_map[closest_chapter].append(file)
+                    print(f"[DEBUG] Assigned {file} to closest chapter {closest_chapter}")
+                    break
+    
+    # Debug output of final chapter groups
+    print(f"\n[DEBUG] Final chapter groups:")
+    for chapter_num in sorted(chapter_map.keys()):
+        files = chapter_map[chapter_num]
+        print(f"  Chapter {chapter_num}: {len(files)} files")
+        for f in files:
+            print(f"    → {f}")
     
     # Build chapter groups with proper ordering
     chapter_groups = []
