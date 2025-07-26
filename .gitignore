@@ -123,6 +123,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# VS Code / Cursor workspace files
+*.code-workspace
+
 # macOS Finder metadata
 .DS_Store
 .AppleDouble

@@ -6,7 +6,10 @@ This project extracts and converts EPUB files into Markdown format for use in Ob
 
 - Extract chapters and table of contents from `.epub` files
 - Convert `.xhtml` files to `.md` using filenames and structure derived from `toc.xhtml`
-- Number files using logical patterns for front matter (`00a`, `00b`, …), chapters (`01`, `01a`, `01b`, …), and back matter (`90`, `91`, …)
+- Number files using logical patterns:
+  - Front matter: `00a`, `00b`, `00c`, etc.
+  - Chapters: `01.0`, `01.1`, `01.2`, ..., `06.0`, `06.1`, etc., where `.0` is the chapter heading and `.1+` are its subsections
+  - Back matter: `90`, `91`, etc.
 - Preserve images and ensure proper embedding in Markdown
 - Update internal links and references for Obsidian-friendly navigation
 - Automate this via a shell script (macOS Automator)
@@ -58,8 +61,11 @@ An EPUB file is essentially a `.zip` archive containing:
 5. **Convert XHTML to Markdown**  
    For each `.xhtml` chapter:  
    - Extract `<title>` from `<head>` section  
-   - Rename output markdown file based on TOC structure (e.g., `01a - Chapter Title.md`)  
-   - Group and number multi-part chapters (e.g., `01a`, `01b`, `01c`) based on TOC mapping  
+   - Rename output Markdown file based on TOC structure:
+     - Front matter → `00a - Preface.md`, `00b - Introduction.md`, etc.
+     - Chapters → `01.0 - CHAPTER TITLE.md` and `01.1 - Subsection Title.md`, `01.2`, etc.
+     - Subsections are grouped under the most recent depth-1 TOC item
+     - This ensures proper numeric sorting in Finder and Obsidian
    - Use TOC to define chapter boundaries and file naming instead of relying on `content.opf` order alone  
    - Convert XHTML body content to Markdown using `pandoc`  
    - A separate function applies post-processing cleanup rules
@@ -117,7 +123,8 @@ pip install beautifulsoup4 lxml
 - Titles will be slugified for use in internal link resolution
 - Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be merged based on TOC structure
 - The cleanup stage uses a dedicated Python function that can be adjusted as needed for formatting edge cases.
- - The script uses the full path to Pandoc (`/opt/homebrew/bin/pandoc`) to ensure compatibility with Automator workflows.
+- The script uses the full path to Pandoc (`/opt/homebrew/bin/pandoc`) to ensure compatibility with Automator workflows.
+- Decimal-style filenames ensure correct Obsidian navigation and file sorting (e.g., `06.0`, `06.1`, `06.2`). Front matter uses alphabetic suffixes (e.g., `00a`) and back matter uses numeric IDs (`90`, `91`, ...).
 
 ---
 
