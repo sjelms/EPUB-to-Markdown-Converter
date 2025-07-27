@@ -82,6 +82,13 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(md_content, 'html.parser')
     
+    # Remove XML declaration and processing instructions
+    for element in soup.find_all(text=True):
+        if isinstance(element, str) and element.strip().startswith('<?xml'):
+            element.extract()
+        elif isinstance(element, str) and element.strip().startswith('<!DOCTYPE'):
+            element.extract()
+    
     # Remove unwanted tags that don't carry semantic meaning
     unwanted_tags = ['span', 'div']
     for tag in soup.find_all(unwanted_tags):
@@ -153,6 +160,9 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     
     # === CLEANUP AND FORMATTING ===
     
+    # Remove XML declarations from the final output
+    markdown_text = re.sub(r'^xml version="1\.0" encoding="UTF-8"\?\n?', '', markdown_text, flags=re.MULTILINE)
+    
     # Collapse multiple newlines into maximum of 2
     markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
     
@@ -162,9 +172,19 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     # Fix heading hierarchy - convert Activity headings to level 3
     markdown_text = re.sub(r'^# Activity (\d+\.\d+)', r'### Activity \1', markdown_text, flags=re.MULTILINE)
     
+    # Fix table-to-heading conversions for activities
+    markdown_text = re.sub(r'^\|  \|  \|\n\| --- \| --- \|\n\| Activity (\d+\.\d+) \| figure \|', r'### Activity \1', markdown_text, flags=re.MULTILINE)
+    
+    # Fix other table-to-heading conversions
+    markdown_text = re.sub(r'^\|  \|  \|\n\| --- \| --- \|\n\| ([^|]+) \| figure \|', r'### \1', markdown_text, flags=re.MULTILINE)
+    
     # Fix bullet list formatting
     markdown_text = re.sub(r'^- $', '', markdown_text, flags=re.MULTILINE)  # Remove empty bullets
     markdown_text = re.sub(r'^- \n', '', markdown_text, flags=re.MULTILINE)  # Remove bullets with only newlines
+    
+    # Fix bullet list artifacts
+    markdown_text = re.sub(r'^- \)_', r'- ', markdown_text, flags=re.MULTILINE)  # Remove )_ artifacts
+    markdown_text = re.sub(r'^- \)_([^_]+)_', r'- \1', markdown_text, flags=re.MULTILINE)  # Fix )_text_ patterns
     
     # Fix spacing around headings
     markdown_text = re.sub(r'([^\n])\n(#{1,6}\s)', r'\1\n\n\2', markdown_text)  # Add space before headings
@@ -223,6 +243,24 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     
     # Remove any remaining artifacts
     markdown_text = re.sub(r'^\s*:\s*$', '', markdown_text, flags=re.MULTILINE)  # Remove stray colons
+    
+    # Remove placeholder artifacts
+    markdown_text = re.sub(r'LINK\)_PLACEHOLDER_', '', markdown_text)
+    markdown_text = re.sub(r'IMAGE\)_PLACEHOLDER_', '', markdown_text)
+    
+    # Fix remaining artifacts
+    markdown_text = re.sub(r'\)\)_([^_]+)_', r'\1', markdown_text)  # Fix ))_text_ patterns
+    markdown_text = re.sub(r'\)_([^_]+)_', r'\1', markdown_text)  # Fix )_text_ patterns
+    
+    # Fix broken image tags
+    markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]+)$', r'![\1](\2)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix malformed citations
+    markdown_text = re.sub(r'([A-Z][a-z]+, [A-Z]\. \([0-9]{4})([A-Z])', r'\1 \2', markdown_text)
+    
+    # Fix remaining artifacts at end of file
+    markdown_text = re.sub(r'\)\n\n# ([^#\n]+)\n\n\)', r')\n\n# \1', markdown_text)
+    markdown_text = re.sub(r'\)\n\n# ([^#\n]+)\n\n\)', r')\n\n# \1', markdown_text)
     
     # Add line breaks after images for better formatting
     markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]+)\)([^\n])', r'![\1](\2)\n\3', markdown_text)
@@ -843,7 +881,7 @@ def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_sta
     ])
 
 def test_single_xhtml(xhtml_path: Path, output_dir: Path | None = None):
-    """Test function to convert a single XHTML file to Markdown and apply cleanup."""
+    """Test function to convert a single XHTML file to Markdown using the new three-phase approach."""
     if output_dir is None:
         output_dir = Path("test_sandbox")
     
@@ -859,27 +897,24 @@ def test_single_xhtml(xhtml_path: Path, output_dir: Path | None = None):
     print(f"Title: {title}")
     print(f"Output: {output_path}")
     
-    # Convert XHTML to Markdown using Pandoc
-    run_pandoc(xhtml_path, output_path)
+    # Read the original XHTML content
+    with open(xhtml_path, "r", encoding="utf-8") as f:
+        xhtml_content = f.read()
     
-    # Read the raw Markdown
-    with open(output_path, "r", encoding="utf-8") as f:
-        raw_md = f.read()
+    print(f"\n=== ORIGINAL XHTML CONTENT (first 500 chars) ===")
+    print(xhtml_content[:500] + "..." if len(xhtml_content) > 500 else xhtml_content)
     
-    print(f"\n=== RAW PANDOC OUTPUT ===")
-    print(raw_md[:500] + "..." if len(raw_md) > 500 else raw_md)
+    # Apply the new three-phase approach directly to XHTML
+    cleaned_md = clean_markdown_text(xhtml_content, None)
     
-    # Apply cleanup
-    cleaned_md = clean_markdown_text(raw_md, None)
-    
-    print(f"\n=== AFTER CLEANUP ===")
+    print(f"\n=== AFTER THREE-PHASE CONVERSION ===")
     print(cleaned_md[:500] + "..." if len(cleaned_md) > 500 else cleaned_md)
     
-    # Save cleaned version
+    # Save the result
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(cleaned_md)
     
-    print(f"\nCleaned version saved to: {output_path}")
+    print(f"\nConverted version saved to: {output_path}")
     return output_path
 
 def main():
@@ -1320,7 +1355,7 @@ if __name__ == "__main__":
         log = {}
     elapsed = time.time() - start_time
     # Show summary dialog with accurate counts
-    show_final_dialog(log, elapsed, md_status=True, cleanup_status=True, json_status=True)
+    # show_final_dialog(log, elapsed, md_status=True, cleanup_status=True, json_status=True)
 
 
         
