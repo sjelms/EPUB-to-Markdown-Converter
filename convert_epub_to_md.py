@@ -525,135 +525,118 @@ def validate_chapter_groups(chapter_groups, max_expected_chapters=20):
     
     return True
 
-def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
+def build_toc_driven_structure(toc_entries, content_root: Path) -> tuple:
     """
-    Build chapter structure based on XHTML metadata instead of TOC patterns.
-    Returns (chapter_groups, front_matter, backmatter) with proper organization.
+    Build chapter structure based on TOC hierarchy first, then validate with metadata.
+    This prevents over-extraction of subsections that are just anchors within chapters.
     
-    ENHANCED: Now handles subsections that are anchors within the same XHTML file as chapters.
+    NEW APPROACH: Use TOC as primary source of truth, only create separate files when
+    TOC indicates different XHTML files, not just different anchors within the same file.
     """
-    # Extract metadata for all files
+    print("\n=== BUILDING TOC-DRIVEN STRUCTURE ===")
+    
+    # Extract metadata for all files for validation
     file_metadata = {}
     for file, _, _, _ in toc_entries:
         xhtml_path = content_root / file
         if xhtml_path.exists():
             file_metadata[file] = extract_xhtml_metadata(xhtml_path)
-            print(f"[DEBUG] {file}: section_id='{file_metadata[file]['section_id']}', level={file_metadata[file]['level']}")
         else:
             print(f"[WARNING] XHTML file not found: {xhtml_path}")
     
-    # Also check all XHTML files in content_root, not just TOC entries
+    # Also check all XHTML files in content_root
     all_xhtml_files = list(content_root.glob("*.xhtml"))
     for xhtml_file in all_xhtml_files:
         if xhtml_file.name not in file_metadata:
             file_metadata[xhtml_file.name] = extract_xhtml_metadata(xhtml_file)
-            print(f"[DEBUG] {xhtml_file.name}: section_id='{file_metadata[xhtml_file.name]['section_id']}', level={file_metadata[xhtml_file.name]['level']}")
     
-    # NEW: Extract subsections from chapter files that contain multiple subsections
-    chapter_subsections = {}  # Maps chapter file to list of subsection metadata
-    for file, metadata in file_metadata.items():
-        if metadata['is_chapter'] and metadata['all_ids']:
-            # Check if this chapter file contains level IDs (subsections)
-            level_ids = [id_val for id_val in metadata['all_ids'] if isinstance(id_val, str) and id_val.startswith('level')]
-            if level_ids:
-                print(f"[INFO] Chapter {file} contains {len(level_ids)} subsections")
-                subsections = extract_subsections_from_xhtml(content_root / file)
-                if subsections:
-                    chapter_subsections[file] = subsections
-                    print(f"[INFO] Extracted {len(subsections)} subsections from {file}")
-    
-    # First pass: identify chapters and build chapter map
-    chapter_map = {}  # Maps chapter number to list of files
+    # TOC-DRIVEN GROUPING LOGIC
+    chapter_groups = []
     frontmatter_files = []
     backmatter_files = []
-    level_files = []  # Files with level metadata (subsections)
     
-    for file, metadata in file_metadata.items():
-        if metadata['is_frontmatter']:
-            frontmatter_files.append(file)
-        elif metadata['is_chapter']:
-            chapter_num = metadata['chapter_number'] or 0
-            if chapter_num not in chapter_map:
-                chapter_map[chapter_num] = []
-            chapter_map[chapter_num].append(file)
-        elif metadata['is_backmatter']:
+    current_chapter = None
+    current_chapter_files = []
+    current_chapter_title = ""
+    
+    # First pass: identify chapter boundaries more carefully
+    chapter_boundaries = []
+    for i, (file, anchor, label, depth) in enumerate(toc_entries):
+        if file == "toc.xhtml":
+            continue
+            
+        metadata = file_metadata.get(file, {})
+        title = metadata.get('title', label)
+        
+        # Only start a new chapter if it's explicitly a "CHAPTER" entry
+        if depth == 1 and "CHAPTER" in title.upper():
+            chapter_boundaries.append(i)
+    
+    # Second pass: group files based on chapter boundaries
+    for i, (file, anchor, label, depth) in enumerate(toc_entries):
+        if file == "toc.xhtml":
+            continue
+            
+        metadata = file_metadata.get(file, {})
+        title = metadata.get('title', label)
+        
+        # Check if this is a chapter boundary
+        if i in chapter_boundaries:
+            # Save previous chapter if exists
+            if current_chapter is not None and current_chapter_files:
+                chapter_groups.append((current_chapter, current_chapter_title, current_chapter_files))
+            
+            # Start new chapter
+            current_chapter = len(chapter_groups) + 1
+            current_chapter_files = [file]
+            current_chapter_title = title
+            continue
+        
+        # Check if this is back matter
+        if any(keyword in title.lower() for keyword in ["references", "glossary", "index", "conclusion", "discussion"]):
+            # Save current chapter if exists
+            if current_chapter is not None and current_chapter_files:
+                chapter_groups.append((current_chapter, current_chapter_title, current_chapter_files))
+            
+            # Add to back matter
             backmatter_files.append(file)
-        elif metadata['level'] is not None:
-            # This is a level-based subsection, we'll assign it to a chapter later
-            level_files.append(file)
-        else:
-            # Unclassified files
+            current_chapter = None
+            current_chapter_files = []
+            continue
+        
+        # Check if this is front matter (before any chapter starts)
+        if current_chapter is None:
             frontmatter_files.append(file)
-    
-    # Second pass: assign level-based files to chapters based on TOC order
-    # We need to determine which chapter each level file belongs to
-    if level_files:
-        print(f"[INFO] Found {len(level_files)} level-based files to assign to chapters")
+            continue
         
-        # Create a mapping from TOC position to chapter number
-        current_chapter = None
-        
-        for file, _, _, _ in toc_entries:
-            if file in chapter_map:
-                # This is a chapter file, update current chapter
-                metadata = file_metadata[file]
-                current_chapter = metadata['chapter_number']
-            elif file in level_files and current_chapter is not None:
-                # This is a level file, assign it to current chapter
-                if current_chapter not in chapter_map:
-                    chapter_map[current_chapter] = []
-                chapter_map[current_chapter].append(file)
-            elif file in level_files:
-                print(f"[WARNING] Level file {file} found before any chapter, cannot assign")
+        # If we're in a chapter, add this file to the current chapter
+        if current_chapter is not None:
+            # Only add if it's a different XHTML file (not just a different anchor)
+            if file not in current_chapter_files:
+                current_chapter_files.append(file)
     
-    # Additional pass: handle level files that might be in separate files
-    # Some EPUBs have subsections as separate XHTML files with level anchors
-    for file, metadata in file_metadata.items():
-        if (metadata['level'] is not None and 
-            file not in [f for files in chapter_map.values() for f in files] and
-            file not in frontmatter_files and 
-            file not in backmatter_files):
-            
-            # Try to find the closest chapter before this file in TOC order
-            closest_chapter = None
-            for toc_file, _, _, _ in toc_entries:
-                if toc_file in chapter_map:
-                    closest_chapter = file_metadata[toc_file]['chapter_number']
-                elif toc_file == file and closest_chapter is not None:
-                    # This level file comes after a chapter, assign it
-                    if closest_chapter not in chapter_map:
-                        chapter_map[closest_chapter] = []
-                    chapter_map[closest_chapter].append(file)
-                    break
+    # Save the last chapter
+    if current_chapter is not None and current_chapter_files:
+        chapter_groups.append((current_chapter, current_chapter_title, current_chapter_files))
     
-    # Debug output of final chapter groups
-    print(f"\n[INFO] Final chapter groups:")
-    for chapter_num in sorted(chapter_map.keys()):
-        files = chapter_map[chapter_num]
-        print(f"  Chapter {chapter_num}: {len(files)} files")
+    # Debug output
+    print(f"\n=== TOC-DRIVEN STRUCTURE RESULTS ===")
+    print(f"Front matter files: {len(frontmatter_files)}")
+    for f in frontmatter_files:
+        print(f"  → {f}")
     
-    # Build chapter groups with proper ordering
-    chapter_groups = []
-    sorted_chapters = sorted(chapter_map.keys())
+    print(f"\nChapters: {len(chapter_groups)}")
+    for chapter_num, title, files in chapter_groups:
+        print(f"Chapter {chapter_num:02d}: {title}")
+        for j, file in enumerate(files):
+            label = f"{chapter_num:02d}.{j}" if j > 0 else f"{chapter_num:02d}.0"
+            print(f"  → {label} - {file}")
     
-    for chapter_num in sorted_chapters:
-        files = chapter_map[chapter_num]
-        if files:
-            # Get the main chapter title (first file in chapter)
-            main_file = files[0]
-            main_metadata = file_metadata[main_file]
-            chapter_title = main_metadata['title']
-            
-            # Sort files within chapter by level and subsection number
-            def sort_key(f):
-                meta = file_metadata[f]
-                level = meta.get('level', 999)  # Default high level for sorting
-                subsection = meta.get('subsection_number', 999)  # Default high subsection
-                # Primary sort by level, secondary by subsection number
-                return (level, subsection)
-            
-            sorted_files = sorted(files, key=sort_key)
-            chapter_groups.append((chapter_num, chapter_title, sorted_files))
+    print(f"\nBack matter files: {len(backmatter_files)}")
+    for f in backmatter_files:
+        print(f"  → {f}")
+    
+    print("=" * 50)
     
     return chapter_groups, frontmatter_files, backmatter_files
 
@@ -687,8 +670,10 @@ def generate_obsidian_toc(conversion_log, output_dir: Path):
             # Front matter (00a, 00b) or back matter (90, 91) - no indentation
             indent = ""
         
-        # Create the TOC entry with proper Obsidian file link
-        toc_lines.append(f"{indent}- [[{output_file}]]")
+        # Create the TOC entry with proper Obsidian file link (without .md extension)
+        # Obsidian automatically hides .md extensions in links
+        toc_link = output_file.replace('.md', '')
+        toc_lines.append(f"{indent}- [[{toc_link}]]")
     
     toc_text = "\n".join(toc_lines)
     toc_path = output_dir / "00 - Table of Contents.md"
@@ -897,14 +882,14 @@ def main():
     toc_main_entries = filtered_toc_main_entries
     # --------------------------------------------------------------
 
-    # === CHAPTER GROUPING (METADATA-DRIVEN) ===
-    # Use XHTML metadata (body type, section id, etc.) to determine proper structure
-    # This is more reliable than TOC pattern matching
-    print("\n=== BUILDING METADATA-DRIVEN STRUCTURE ===")
-    chapter_groups, front_matter, back_matter = build_metadata_driven_structure(toc_main_entries, content_root)
+    # === CHAPTER GROUPING (TOC-DRIVEN) ===
+    # Use TOC hierarchy as primary source of truth, validate with metadata
+    # This prevents over-extraction of subsections that are just anchors within chapters
+    print("\n=== BUILDING TOC-DRIVEN STRUCTURE ===")
+    chapter_groups, front_matter, back_matter = build_toc_driven_structure(toc_main_entries, content_root)
     
-    # Enhanced debug output
-    print("\n=== METADATA-DRIVEN STRUCTURE RESULTS ===")
+    # Debug output for TOC-driven structure
+    print("\n=== TOC-DRIVEN STRUCTURE RESULTS ===")
     print(f"Front matter files: {len(front_matter)}")
     for f in front_matter:
         print(f"  → {f}")
@@ -922,69 +907,12 @@ def main():
     
     print("=" * 50)
     
-    # NEW: Extract subsections from chapter files and create separate files for each subsection
-    print("\n=== EXTRACTING SUBSECTIONS ===")
-    subsection_files = {}  # Maps original file to list of subsection file names
-    
-    for chapter_num, title, files in chapter_groups:
-        for file in files:
-            xhtml_path = content_root / file
-            subsections = extract_subsections_from_xhtml(xhtml_path)
-            if subsections:
-                print(f"[INFO] Found {len(subsections)} subsections in {file}")
-                subsection_files[file] = []
-                
-                # Create separate files for each subsection
-                for i, subsection in enumerate(subsections):
-                    subsection_filename = f"{file.replace('.xhtml', '')}_subsection_{i+1:03d}.xhtml"
-                    subsection_files[file].append(subsection_filename)
-                    
-                    # Create a new XHTML file for this subsection
-                    subsection_path = content_root / subsection_filename
-                    
-                    # Read the original file and extract just this subsection
-                    with open(xhtml_path, 'r', encoding='utf-8') as f:
-                        soup = BeautifulSoup(f, 'xml')
-                    
-                    # Find the subsection tag
-                    subsection_tag = soup.find(id=subsection['section_id'])
-                    if subsection_tag and isinstance(subsection_tag, Tag):
-                        # Create a new XHTML structure for this subsection
-                        new_soup = BeautifulSoup('<?xml version="1.0" encoding="UTF-8"?>', 'xml')
-                        html_tag = new_soup.new_tag('html')
-                        html_tag['xmlns'] = 'http://www.w3.org/1999/xhtml'
-                        new_soup.append(html_tag)
-                        
-                        head_tag = new_soup.new_tag('head')
-                        html_tag.append(head_tag)
-                        
-                        title_tag = new_soup.new_tag('title')
-                        title_tag.string = subsection['title']
-                        head_tag.append(title_tag)
-                        
-                        body_tag = new_soup.new_tag('body')
-                        html_tag.append(body_tag)
-                        
-                        # Copy the subsection content
-                        body_tag.append(subsection_tag)
-                        
-                        # Write the new subsection file
-                        with open(subsection_path, 'w', encoding='utf-8') as f:
-                            f.write(str(new_soup))
-                        
-                        print(f"  → Created subsection file: {subsection_filename}")
-    
-    # Update chapter groups to include subsection files
-    updated_chapter_groups = []
-    for chapter_num, title, files in chapter_groups:
-        updated_files = []
-        for file in files:
-            updated_files.append(file)  # Add the original chapter file
-            if file in subsection_files:
-                updated_files.extend(subsection_files[file])  # Add subsection files
-        updated_chapter_groups.append((chapter_num, title, updated_files))
-    
-    chapter_groups = updated_chapter_groups
+    # TOC-DRIVEN APPROACH: No subsection extraction needed
+    # We now use the TOC structure to determine file grouping
+    # Subsections that are anchors within the same XHTML file stay as part of that file
+    print("\n=== TOC-DRIVEN APPROACH: No subsection extraction ===")
+    print("[INFO] Using TOC structure to determine file grouping")
+    print("[INFO] Subsections that are anchors within the same XHTML file will remain as part of that file")
 
     conversion_log["chapter_groups"] = [
         {"chapter_num": f"{num:02d}", "title": title, "files": group}
@@ -1009,7 +937,15 @@ def main():
 
     # --- Front Matter ---
     # Files not referenced in TOC are considered front matter and labeled as 00a, 00b, ...
-    for i, fname in enumerate(front_matter):
+    # Sort frontmatter files by their order in the TOC to ensure sequential lettering
+    frontmatter_with_order = []
+    for i, (file, anchor, label, depth) in enumerate(toc_entries):
+        if file in front_matter:
+            frontmatter_with_order.append((i, file))  # (toc_index, filename)
+    
+    # Sort by TOC order and assign sequential letters
+    frontmatter_with_order.sort(key=lambda x: x[0])
+    for i, (toc_index, fname) in enumerate(frontmatter_with_order):
         label = f"00{chr(ord('a') + i)}"
         chapter_index_map[fname] = label
         file_sections.append((label, [fname], "Front Matter"))
