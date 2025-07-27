@@ -97,6 +97,15 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     
     md = re.sub(r'\[([^\]]+)\]\(([^)]+\.xhtml#[^)]+)\)', protect_cross_ref, md)
     
+    # Also protect any remaining external links that might have been missed
+    def protect_remaining_links(match):
+        link_text = match.group(1)
+        link_url = match.group(2)
+        return f"EXTERNAL_LINK_PLACEHOLDER_{link_text}_{link_url}"
+    
+    # This will catch any remaining [text](url) patterns that weren't caught above
+    md = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', protect_remaining_links, md)
+    
     # === PHASE 2: AGGRESSIVE ARTIFACT REMOVAL ===
     
     # Remove all table artifacts
@@ -104,13 +113,16 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     md = re.sub(r'\+-{20,}\+', '', md)  # Remove table cell boundaries with dashes
     md = re.sub(r'\|-{20,}\|', '', md)  # Remove table separators
     md = re.sub(r' -{20,} ', ' ', md)   # Remove dash lines
+    md = re.sub(r'-{20,}\+', '', md)    # Remove trailing dashes with +
+    md = re.sub(r'-{20,}', '', md)      # Remove any remaining long dash sequences
     
     # Remove all stray pipes (except those in placeholders)
     md = re.sub(r'(?<!PLACEHOLDER_)\|(?!PLACEHOLDER_)', '', md)
     
     # Remove all stray brackets (except those in placeholders)
-    md = re.sub(r'(?<!PLACEHOLDER_)\[(?!PLACEHOLDER_)', '', md)
-    md = re.sub(r'(?<!PLACEHOLDER_)\](?!PLACEHOLDER_)', '', md)
+    # More robust protection: don't remove brackets that are part of placeholder patterns
+    md = re.sub(r'(?<!PLACEHOLDER_)\[(?!.*PLACEHOLDER_)', '', md)
+    md = re.sub(r'(?<!PLACEHOLDER_)\](?!.*PLACEHOLDER_)', '', md)
     
     # Remove EPUB/Pandoc artifacts
     md = re.sub(r'\[\]{#[^}]*\.pagebreak[^}]*}', '', md)  # Page break elements
@@ -143,6 +155,12 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     # Handle various activity formats
     md = re.sub(r'^(# Activity \d+\.\d+)\s*IMAGE_PLACEHOLDER_([^_]+)_([^_]+)$', fix_activity_format, md, flags=re.MULTILINE)
     
+    # Also handle activity format that wasn't caught by placeholder protection
+    md = re.sub(r'^(# Activity \d+\.\d+)\s*!\[figure\]\(([^)]+)\)', fix_activity_format, md, flags=re.MULTILINE)
+    
+    # Fix activity headings that weren't converted (final fallback)
+    md = re.sub(r'^# Activity (\d+\.\d+)', r'### Activity \1', md, flags=re.MULTILINE)
+    
     # Handle other table format headings
     def fix_other_table_heading(match):
         heading_text = match.group(1).strip()
@@ -158,6 +176,10 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
         # Look for patterns that look like tables and convert them
         lines = table_content.split('\n')
         if len(lines) < 2:
+            return table_content
+        
+        # Skip if this contains images or headings (not a real table)
+        if 'IMAGE_PLACEHOLDER_' in table_content or any(line.strip().startswith('#') for line in lines):
             return table_content
         
         # Simple conversion: split by spaces and create bullet lists
@@ -179,12 +201,38 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     # Apply table conversion to multi-line structures that look like tables
     md = re.sub(r'(?:[^\n]+\s{3,}[^\n]+\n)+', convert_table_to_bullets, md, flags=re.MULTILINE)
     
-    # === PHASE 4: RESTORE PROTECTED CONTENT ===
+    # === PHASE 4: CLEAN UP BULLET LISTS ===
+    
+    # Remove bullets from standalone images (images are not list items)
+    md = re.sub(r'^- !\[([^\]]+)\]\(([^)]+)\)', r'![\1](\2)', md, flags=re.MULTILINE)
+    
+    # Fix bullet list breaks after headings
+    md = re.sub(r'^(#{1,6}\s+[^#\n]+)\n- $', r'\1\n', md, flags=re.MULTILINE)  # Remove stray bullets
+    md = re.sub(r'^(#{1,6}\s+[^#\n]+)\n\n- ([^-])', r'\1\n\n- \2', md, flags=re.MULTILINE)  # Fix spacing
+    
+    # Remove empty bullet points
+    md = re.sub(r'^- $\n', '', md, flags=re.MULTILINE)
+    
+    # === PHASE 5: RESTORE PROTECTED CONTENT ===
     
     # Restore images
     def restore_image(match):
         alt_text = match.group(1)
         img_path = match.group(2)
+        
+        # Clean up malformed image paths
+        img_path = img_path.rstrip(' -_')  # Remove trailing dashes, spaces, underscores
+        
+        # Fix common path issues
+        if img_path.endswith('_1.jpg'):
+            img_path = img_path.replace('_1.jpg', '.jpg')
+        if img_path.endswith('_1.png'):
+            img_path = img_path.replace('_1.png', '.png')
+        
+        # Ensure proper image syntax
+        if not img_path.endswith(')'):
+            img_path = img_path + ')'
+        
         return f"![{alt_text}]({img_path})"
     
     md = re.sub(r'IMAGE_PLACEHOLDER_([^_]+)_([^_]+)', restore_image, md)
@@ -224,10 +272,14 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     
     # === PHASE 5: FINAL FORMATTING POLISH ===
     
-    # Fix heading hierarchy
+    # Fix heading hierarchy (only for actual # headings, not already-formatted ones)
     def fix_heading_level(match):
         heading_level = match.group(1)
         content = match.group(2)
+        
+        # Don't modify if content already has heading markers
+        if content.strip().startswith('#'):
+            return match.group(0)
         
         if heading_level == '1' and len(content.strip()) < 80:
             return f"### {content.strip()}"
@@ -259,6 +311,22 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     
     # Remove final artifacts
     md = re.sub(r'^\s*:\s*$', '', md, flags=re.MULTILINE)
+    
+    # Remove any remaining placeholder artifacts
+    md = re.sub(r'EXTERNAL\)_LINK_PLACEHOLDER_', '', md)  # Fix malformed placeholders
+    md = re.sub(r'EXTERNAL\)_LINK_PLACEHOLDER_', '', md)  # Fix malformed placeholders
+    md = re.sub(r'CROSS_REF_PLACEHOLDER_([^_]+)_([^_]+)', r'[\1](\2)', md)  # Convert to simple links
+    
+    # Fix any remaining malformed placeholders
+    md = re.sub(r'EXTERNAL\)\)_LINK_PLACEHOLDER_', '', md)
+    md = re.sub(r'EXTERNAL\)\)_LINK_PLACEHOLDER_', '', md)
+    
+    # Add line breaks after images
+    md = re.sub(r'!\[([^\]]+)\]\(([^)]+)\)([^\n])', r'![\1](\2)\n\3', md)
+    
+    # Fix malformed image paths
+    md = re.sub(r'!\[([^\]]+)\]\(([^)]+)\)_1\.(jpg|png)\)', r'![\1](\2.\3)', md)
+    md = re.sub(r'!\[([^\]]+)\]\(([^)]+)\)_1\.(jpg|png)', r'![\1](\2.\3)', md)
     
     return md.strip() + '\n'
 
