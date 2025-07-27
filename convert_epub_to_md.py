@@ -104,7 +104,9 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
                 file_part, anchor = target, ""
             if file_part in chapter_map:
                 md_target = chapter_map[file_part]
-                return f"[[{md_target}#{anchor}]]" if anchor else f"[[{md_target}]]"
+                # Since we now have separate files for each chapter and subsection,
+                # we link directly to the file without anchors
+                return f"[[{md_target}]]"
             else:
                 return text  # Leave unchanged if file not found
 
@@ -657,44 +659,37 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
 
 # === CLI ===
 
-def generate_obsidian_toc(toc_entries, chapter_map, output_dir: Path):
-    """Create a Markdown-formatted TOC compatible with Obsidian."""
-    from collections import defaultdict
+def generate_obsidian_toc(conversion_log, output_dir: Path):
+    """Create a Markdown-formatted TOC compatible with Obsidian based on actual output files."""
     toc_lines = ["# Table of Contents", ""]
-    def obsidian_anchor(text):
-        text = re.sub(r'[^\w\s-]', '', text)  # Remove punctuation
-        text = re.sub(r'\s+', '-', text.strip().lower())  # Replace spaces with hyphens
-        return text
-    skip_mode = False
-    duplicate_anchors = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "pi", "pii", "piii", "piv"}
-    for entry in toc_entries:
-        # toc_entries: list of (file_part, anchor, label, depth) or older forms
-        if len(entry) == 4:
-            file, anchor, label, depth = entry
-        elif len(entry) == 3:
-            file, anchor, label = entry
-            depth = 1
-        elif len(entry) == 2:
-            file, label = entry
-            anchor = None
-            depth = 1
+    
+    # Sort chapters by their index to maintain proper order
+    sorted_chapters = sorted(conversion_log["chapters"], key=lambda x: x["index"])
+    
+    for chapter in sorted_chapters:
+        index = chapter["index"]
+        title = chapter["title"]
+        output_file = chapter["output_file"]
+        
+        # Determine indentation based on the index structure
+        # Main chapters (e.g., "01.0", "02.0") get no indentation
+        # Subsections (e.g., "01.1", "01.2") get one level of indentation
+        # Sub-subsections (e.g., "01.1.1") would get two levels, etc.
+        if "." in index:
+            parts = index.split(".")
+            if len(parts) >= 2 and parts[1] == "0":
+                # Main chapter - no indentation
+                indent = ""
+            else:
+                # Subsection - one level of indentation
+                indent = "  "
         else:
-            continue
-        # Insert skip logic for Arabic/duplicate sections
-        # If label has Arabic TOC or matches duplicate anchor, skip all subsequent entries
-        if any(kw in (label or "") for kw in ["قائمة الصفحات", "قائمة", "Index"]) or (anchor and re.match(r'^p?i{1,3}v?$', anchor)):
-            skip_mode = True
-        if skip_mode:
-            continue
-        if file not in chapter_map:
-            continue
-        md_file = chapter_map[file]
-        indent = "  " * (depth - 1)
-        if anchor:
-            clean_anchor = obsidian_anchor(label)
-            toc_lines.append(f"{indent}- [[{md_file}#{clean_anchor}]]")
-        else:
-            toc_lines.append(f"{indent}- [[{md_file}]]")
+            # Front matter (00a, 00b) or back matter (90, 91) - no indentation
+            indent = ""
+        
+        # Create the TOC entry with proper Obsidian file link
+        toc_lines.append(f"{indent}- [[{output_file}]]")
+    
     toc_text = "\n".join(toc_lines)
     toc_path = output_dir / "00 - Table of Contents.md"
     with open(toc_path, "w", encoding="utf-8") as f:
@@ -1150,7 +1145,7 @@ def main():
     # The toc.xhtml file has been excluded from content processing above to prevent duplicates
     toc_path = output_dir / "00 - Table of Contents.md"
     if not toc_path.exists():
-        generate_obsidian_toc(toc_entries, chapter_map, output_dir)
+        generate_obsidian_toc(conversion_log, output_dir)
         print(f"[INFO] Generated Obsidian-compatible TOC: {toc_path}")
     else:
         print(f"[INFO] TOC file already exists, skipping generation")
