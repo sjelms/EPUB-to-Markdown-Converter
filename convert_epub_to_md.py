@@ -62,294 +62,203 @@ def safe_filename(title: str) -> str:
     return safe_title
 
 def clean_markdown_text(md: str, chapter_map=None) -> str:
-    """Apply post-processing cleanup rules to raw Markdown."""
+    """Apply post-processing cleanup rules to raw Markdown using systematic approach."""
     
-    # === HEADING HIERARCHY FIX ===
-    # Convert headings based on class attributes to maintain proper hierarchy
-    # This handles cases where <h1> has class="h3" and should be ### in Markdown
-    def fix_heading_hierarchy(match):
-        heading_level = match.group(1)
-        content = match.group(2)
-        
-        # If heading level is 1 but content suggests it should be lower level
-        # (e.g., h1 with class="h3"), adjust the level
-        if heading_level == '1':
-            # Check if this looks like a subsection (shorter, more specific)
-            if len(content.strip()) < 80 and any(word in content.lower() for word in ['and', 'or', 'but', 'for', 'with', 'in', 'on', 'at']):
-                return f"### {content.strip()}"
-            # Check if it's a numbered subsection (e.g., "2.1", "3.2")
-            elif re.match(r'^\d+\.\d+', content.strip()):
-                return f"### {content.strip()}"
-        
-        return match.group(0)  # Keep original if no changes needed
+    # === PHASE 1: PROTECT WHAT WE WANT TO KEEP ===
     
-    # Apply heading hierarchy fix
-    md = re.sub(r'^(#{1,6})\s+(.+)$', fix_heading_hierarchy, md, flags=re.MULTILINE)
-    
-    # === REMOVE EPUB ARTIFACTS ===
-    
-    # Remove page break elements: []{#p23 .pagebreak epub:type="pagebreak" title="23"}
-    md = re.sub(r'\[\]{#[^}]*\.pagebreak[^}]*}', '', md)
-    
-    # Remove span/div attributes from headings: {#h2_000019 .h3 xml:space="preserve"}
-    md = re.sub(r'\{#[^}]*\}\s*$', '', md, flags=re.MULTILINE)
-    
-    # Remove heading attributes anywhere in the line: {#h1_000008 .h3b}
-    md = re.sub(r'\{#[^}]*\.h[0-9][a-z]?\}', '', md)
-    
-    # Remove XML attributes from headings: xml:space="preserve"
-    md = re.sub(r'\s+xml:space="[^"]*"', '', md)
-    
-    # Remove EPUB type attributes: epub:type="..."
-    md = re.sub(r'\s+epub:type="[^"]*"', '', md)
-    
-    # Remove any remaining heading attributes in braces: {#h1_000020 .h3b}
-    md = re.sub(r'\s*\{#[^}]*\}\s*', ' ', md)
-    
-    # Remove Pandoc fenced divs (e.g., ::: {.class})
-    md = re.sub(r'::: ?\{[^}]*\}', '', md)
-    # Remove closing fenced divs (:::)
-    md = re.sub(r':::', '', md)
-    
-    # === CLEAN TEXT CONTENT ===
-    
-    # Remove span wrappers while preserving content: [text]{#span_000130 .text} → text
-    md = re.sub(r'\[([^\]]*?)\]\{#span_[^}]*\.text\}', r'\1', md)
-    
-    # Remove other span attributes: {#span_000130 .text}
-    md = re.sub(r'\{#span_[^}]*\.text\}', '', md)
-    
-    # Remove list item attributes: [text]{#li_000075} → text
-    md = re.sub(r'\[([^\]]*?)\]\{#li_[^}]*\}', r'\1', md)
-    
-    # Remove list item brackets without attributes: [text] → text
-    md = re.sub(r'^\s*-\s*\[([^\]]+)\]$', r'- \1', md, flags=re.MULTILINE)
-    
-    # Remove anchor attributes: {#a_000037 xml:space="preserve"}
-    md = re.sub(r'\{#a_[^}]*\}', '', md)
-    
-    # Remove image attributes: {#img_000021 .inline xml:space="preserve"}
-    md = re.sub(r'\{#img_[^}]*\}', '', md)
-    
-    # Remove same-file internal anchor links: [text](#anchor) → text
-    md = re.sub(r'\[([^\]]+)\]\(#[^)]+\)', r'\1', md)
-    
-    # === FIX IMAGE LINKS ===
-    
-    # Update image paths to point to images/ folder and preserve dimensions
-    def fix_image_links(match):
+    # Replace images with placeholders to protect them during cleanup
+    def protect_image(match):
         alt_text = match.group(1)
         img_path = match.group(2)
-        # Remove any existing path and point to images folder
-        img_filename = Path(img_path).name
-        return f'![{alt_text}](images/{img_filename})'
+        return f"IMAGE_PLACEHOLDER_{alt_text}_{img_path}"
     
-    md = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', fix_image_links, md)
+    md = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', protect_image, md)
     
-    # === ENHANCED CROSS-REFERENCE HANDLING ===
+    # Replace external links with placeholders
+    def protect_external_link(match):
+        link_text = match.group(1)
+        link_url = match.group(2)
+        return f"EXTERNAL_LINK_PLACEHOLDER_{link_text}_{link_url}"
     
-    # Convert "see chapter X" to Obsidian links
-    if chapter_map:
-        def convert_chapter_refs(match):
-            chapter_text = match.group(1)
-            chapter_num = match.group(2)
-            # Look for matching chapter in chapter_map
-            for filename, title in chapter_map.items():
-                if f"Chapter {chapter_num}" in title or f"CHAPTER {chapter_num}" in title:
-                    return f"see [[{title}]]"
-            return chapter_text  # Keep original if no match found
+    md = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', protect_external_link, md)
+    
+    # Replace internal Obsidian links with placeholders
+    def protect_internal_link(match):
+        link_text = match.group(1)
+        return f"INTERNAL_LINK_PLACEHOLDER_{link_text}"
+    
+    md = re.sub(r'\[\[([^\]]+)\]\]', protect_internal_link, md)
+    
+    # Replace cross-references with placeholders
+    def protect_cross_ref(match):
+        link_text = match.group(1)
+        target = match.group(2)
+        return f"CROSS_REF_PLACEHOLDER_{link_text}_{target}"
+    
+    md = re.sub(r'\[([^\]]+)\]\(([^)]+\.xhtml#[^)]+)\)', protect_cross_ref, md)
+    
+    # === PHASE 2: AGGRESSIVE ARTIFACT REMOVAL ===
+    
+    # Remove all table artifacts
+    md = re.sub(r'\|-{20,}\+', '', md)  # Remove table separators with excessive dashes
+    md = re.sub(r'\+-{20,}\+', '', md)  # Remove table cell boundaries with dashes
+    md = re.sub(r'\|-{20,}\|', '', md)  # Remove table separators
+    md = re.sub(r' -{20,} ', ' ', md)   # Remove dash lines
+    
+    # Remove all stray pipes (except those in placeholders)
+    md = re.sub(r'(?<!PLACEHOLDER_)\|(?!PLACEHOLDER_)', '', md)
+    
+    # Remove all stray brackets (except those in placeholders)
+    md = re.sub(r'(?<!PLACEHOLDER_)\[(?!PLACEHOLDER_)', '', md)
+    md = re.sub(r'(?<!PLACEHOLDER_)\](?!PLACEHOLDER_)', '', md)
+    
+    # Remove EPUB/Pandoc artifacts
+    md = re.sub(r'\[\]{#[^}]*\.pagebreak[^}]*}', '', md)  # Page break elements
+    md = re.sub(r'<span[^>]*epub:type="pagebreak"[^>]*/>', '', md)  # Page break spans
+    md = re.sub(r'::: ?\{[^}]*\}', '', md)  # Pandoc fenced divs
+    md = re.sub(r':::', '', md)  # Pandoc fenced divs
+    md = re.sub(r'\{#[^}]*\.h[0-9][a-z]?\}', '', md)  # EPUB heading attributes
+    md = re.sub(r'\s+xml:space="[^"]*"', '', md)  # XML space attributes
+    md = re.sub(r'\s+epub:type="[^"]*"', '', md)  # EPUB type attributes
+    md = re.sub(r'\s*\{#[^}]*\}\s*', ' ', md)  # Remaining heading attributes
+    md = re.sub(r'^::\s*$', '', md, flags=re.MULTILINE)  # Stray colons
+    
+    # Remove Pandoc text artifacts
+    md = re.sub(r'\[([^\]]*?)\]\{#span_[^}]*\.text\}', r'\1', md)  # Pandoc span wrappers
+    md = re.sub(r'\[([^\]]*?)\]\{#li_[^}]*\}', r'\1', md)  # Pandoc list item attributes
+    md = re.sub(r'\{#img_[^}]*\}', '', md)  # Pandoc image attributes
+    
+    # Remove empty brackets
+    md = re.sub(r'\[\]', '', md)
+    
+    # === PHASE 3: CONVERT TABLE-LIKE STRUCTURES TO BULLET LISTS ===
+    
+    # Convert activity table format to proper heading with inline image
+    def fix_activity_format(match):
+        activity_text = match.group(1).strip()
+        img_path = match.group(2)
+        activity_num = activity_text.replace('# ', '').replace('Activity ', '')
+        return f"### Activity {activity_num} IMAGE_PLACEHOLDER_Activity {activity_num}_{img_path}"
+    
+    # Handle various activity formats
+    md = re.sub(r'^(# Activity \d+\.\d+)\s*IMAGE_PLACEHOLDER_([^_]+)_([^_]+)$', fix_activity_format, md, flags=re.MULTILINE)
+    
+    # Handle other table format headings
+    def fix_other_table_heading(match):
+        heading_text = match.group(1).strip()
+        img_path = match.group(2)
+        return f"### {heading_text} IMAGE_PLACEHOLDER_figure_{img_path}"
+    
+    md = re.sub(r'^(# [^_]+)\s*IMAGE_PLACEHOLDER_([^_]+)_([^_]+)$', fix_other_table_heading, md, flags=re.MULTILINE)
+    
+    # Convert remaining table-like structures to bullet lists
+    def convert_table_to_bullets(match):
+        table_content = match.group(0)
         
-        md = re.sub(r'(see chapter (\d+))', convert_chapter_refs, md, flags=re.IGNORECASE)
-        md = re.sub(r'(as discussed in chapter (\d+))', convert_chapter_refs, md, flags=re.IGNORECASE)
+        # Look for patterns that look like tables and convert them
+        lines = table_content.split('\n')
+        if len(lines) < 2:
+            return table_content
+        
+        # Simple conversion: split by spaces and create bullet lists
+        result = []
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('-') and not line.startswith('#'):
+                # Split by multiple spaces (likely table columns)
+                parts = re.split(r'\s{3,}', line)
+                if len(parts) > 1:
+                    for part in parts:
+                        if part.strip():
+                            result.append(f"- {part.strip()}")
+                else:
+                    result.append(f"- {line}")
+        
+        return '\n'.join(result) if result else table_content
     
-    # Convert cross-chapter links to Obsidian-style [[filename]]
-    if chapter_map:
-        def replace_cross_links(match):
-            text, target = match.group(1), match.group(2)
+    # Apply table conversion to multi-line structures that look like tables
+    md = re.sub(r'(?:[^\n]+\s{3,}[^\n]+\n)+', convert_table_to_bullets, md, flags=re.MULTILINE)
+    
+    # === PHASE 4: RESTORE PROTECTED CONTENT ===
+    
+    # Restore images
+    def restore_image(match):
+        alt_text = match.group(1)
+        img_path = match.group(2)
+        return f"![{alt_text}]({img_path})"
+    
+    md = re.sub(r'IMAGE_PLACEHOLDER_([^_]+)_([^_]+)', restore_image, md)
+    
+    # Restore external links
+    def restore_external_link(match):
+        link_text = match.group(1)
+        link_url = match.group(2)
+        return f"[{link_text}]({link_url})"
+    
+    md = re.sub(r'EXTERNAL_LINK_PLACEHOLDER_([^_]+)_([^_]+)', restore_external_link, md)
+    
+    # Restore internal links
+    def restore_internal_link(match):
+        link_text = match.group(1)
+        return f"[[{link_text}]]"
+    
+    md = re.sub(r'INTERNAL_LINK_PLACEHOLDER_([^_]+)', restore_internal_link, md)
+    
+    # Restore cross-references (convert to Obsidian format if chapter_map provided)
+    def restore_cross_ref(match):
+        link_text = match.group(1)
+        target = match.group(2)
+        
+        if chapter_map:
             if "#" in target:
                 file_part, anchor = target.split("#", 1)
             else:
                 file_part, anchor = target, ""
             if file_part in chapter_map:
                 md_target = chapter_map[file_part]
-                # Since we now have separate files for each chapter and subsection,
-                # we link directly to the file without anchors
                 return f"[[{md_target}]]"
-            else:
-                return text  # Leave unchanged if file not found
-
-        md = re.sub(r'\[([^\]]+)\]\(([^)]+\.xhtml#[^)]+)\)', replace_cross_links, md)
+        
+        return f"[{link_text}]({target})"  # Keep original if no chapter_map
     
-    # === PRESERVE ESSENTIAL FORMATTING ===
+    md = re.sub(r'CROSS_REF_PLACEHOLDER_([^_]+)_([^_]+)', restore_cross_ref, md)
     
-    # Collapse multiple blank lines to a single blank line
-    md = re.sub(r'\n{3,}', '\n\n', md)
+    # === PHASE 5: FINAL FORMATTING POLISH ===
     
-    # Remove lines before first heading to clean leading content
-    lines = md.strip().splitlines()
-    for i, line in enumerate(lines):
-        if line.strip().startswith('#'):
-            md = '\n'.join(lines[i:])
-            break
-    
-    # Remove square brackets around citation-style blocks (not links)
-    # Only unwrap if content looks like a citation (e.g., Author (Year))
-    md = re.sub(
-        r'(?<!\!)\[(.{20,}?)\](?!\()',
-        lambda m: m.group(1) if re.search(r'\w+\s+\(\d{4}', m.group(1)) else m.group(0),
-        md
-    )
-    
-    # Convert isolated quotes followed by attribution into block quotes
-    # Matches paragraphs with quotes and attribution on separate lines
-    quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
-    md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
-    
-    # === CLEAN UP REMAINING ARTIFACTS ===
-    
-    # Remove any remaining empty brackets
-    md = re.sub(r'\[\]', '', md)
-    
-    # Fix orphaned opening brackets: [text without closing bracket
-    md = re.sub(r'\[([^\]\n]+)$', r'\1', md, flags=re.MULTILINE)
-    
-    # Fix orphaned brackets in the middle of text: text[ → text
-    md = re.sub(r'([^\s])\[([^\]\n]*?)$', r'\1\2', md, flags=re.MULTILINE)
-    
-    # Fix orphaned brackets in parentheses: (text[) → (text)
-    md = re.sub(r'\(([^)]*?)\[\)', r'(\1)', md)
-    
-    # Fix orphaned brackets at end of parentheses: (text).] → (text).
-    md = re.sub(r'\(([^)]*?)\)\.\]', r'(\1).', md)
-    
-    # Remove dash lines around headings and images: |--------------------------------------------------------------------+
-    md = re.sub(r'\|-{10,}\+', '', md)
-    
-    # Remove excessive dashes in table content: ----------------------------------------------------------------------------------------------------------------------------------------------------
-    md = re.sub(r' -{20,} ', ' ', md)
-    
-    # Clean up excessive whitespace
-    md = re.sub(r' +', ' ', md)
-    
-    # Ensure proper line breaks around headings
-    md = re.sub(r'([^\n])\n(#)', r'\1\n\n\2', md)
-    
-    # Fix table formatting - remove excessive dashes and plus signs
-    md = re.sub(r'\+-{3,}\+', '|', md)
-    md = re.sub(r'\|-{3,}\|', '|', md)
-    
-    # Fix broken table rows - convert single column tables to proper format
-    md = re.sub(r'^\|([^|]+)\|$', r'| \1 |', md, flags=re.MULTILINE)
-    
-    # === FORMATTING IMPROVEMENTS ===
-    
-    # Convert double hyphens to em dash: -- → —
-    md = re.sub(r'--', '—', md)
-    
-    # Convert asterisk italics to underscore italics: *text* → _text_
-    md = re.sub(r'\*([^*]+)\*', r'_\1_', md)
-    
-    # Fix spacing around styled text: add spaces where missing
-    # Fix: nature of reality*Realism* → nature of reality *Realism*
-    md = re.sub(r'([a-zA-Z])\*([^*]+)\*', r'\1 *\2*', md)
-    md = re.sub(r'\*([^*]+)\*([a-zA-Z])', r'*\1* \2', md)
-    
-    # Fix spacing around italic text: add spaces where missing
-    md = re.sub(r'([a-zA-Z])_([^_]+)_', r'\1 _\2_', md)
-    md = re.sub(r'_([^_]+)_([a-zA-Z])', r'_\1_ \2', md)
-    
-    # Fix extra spaces in italic text: _ text _ → _text_
-    md = re.sub(r'_\s+([^_]+)\s+_', r'_\1_', md)
-    
-    # Fix italic formatting issues at start of paragraphs: _ text → _text
-    md = re.sub(r'^\s*_\s+([^_]+)_', r'_\1_', md, flags=re.MULTILINE)
-    
-    # Fix italic formatting issues with leading spaces: _ text_ → _text_
-    md = re.sub(r'_\s+([^_]+)_', r'_\1_', md)
-    
-    # Fix italic text with trailing spaces: _text _ → _text_
-    md = re.sub(r'_([^_]+)\s+_', r'_\1_', md)
-    
-    # Fix italic text with spaces at both ends: _ text _ → _text_
-    md = re.sub(r'_\s+([^_]+)\s+_', r'_\1_', md)
-    
-    # Remove extra spaces around italic text: text _text_ text → text _text_ text
-    md = re.sub(r'(\w)\s+_([^_]+)_\s+(\w)', r'\1 _\2_ \3', md)
-    
-    # Fix missing spaces after em dashes: Ontology —realism → Ontology — realism
-    md = re.sub(r'—([a-zA-Z])', r'— \1', md)
-    
-    # === STRAY BRACKET CLEANUP ===
-    
-    # Remove stray brackets after styled text: *text*[ → *text*
-    md = re.sub(r'\*([^*]+)\*\[', r'*\1*', md)
-    md = re.sub(r'_([^_]+)_\[', r'_\1_', md)
-    
-    # Remove stray brackets after numbers: Table 2.1[ → Table 2.1
-    md = re.sub(r'(\d+\.\d+)\[', r'\1', md)
-    md = re.sub(r'(\d+)\[', r'\1', md)
-    
-    # Remove stray brackets after words ending in numbers: Table 2.1[ → Table 2.1
-    md = re.sub(r'([A-Za-z]+\s+\d+\.\d+)\[', r'\1', md)
-    md = re.sub(r'([A-Za-z]+\s+\d+)\[', r'\1', md)
-    
-    # Remove any remaining orphaned brackets at end of lines
-    md = re.sub(r'\[$', '', md, flags=re.MULTILINE)
-    
-    # Remove stray brackets at end of sentences: [.] → .
-    md = re.sub(r'\[\.\]', '.', md)
-    
-    # Remove stray brackets at start of lines: ] → (empty)
-    md = re.sub(r'^\s*\]\s*', '', md, flags=re.MULTILINE)
-    
-    # Remove stray brackets that appear alone on lines
-    md = re.sub(r'^\s*\]\s*$', '', md, flags=re.MULTILINE)
-    
-    # Remove orphaned opening brackets followed by text: [text → text
-    md = re.sub(r'\[([^\]\n]+?)(?=\s|$)', r'\1', md, flags=re.MULTILINE)
-    
-    # Remove orphaned closing brackets preceded by text: text] → text
-    md = re.sub(r'([^\s\n])\](?=\s|$)', r'\1', md, flags=re.MULTILINE)
-    
-    # Remove brackets around italic text: [_text_] → _text_
-    md = re.sub(r'\[_([^_]+)_\]', r'_\1_', md)
-    
-    # Remove brackets around text with spaces: [ text ] → text
-    md = re.sub(r'\[\s+([^\]\n]+?)\s+\]', r'\1', md, flags=re.MULTILINE)
-    
-    # Remove stray colons before headings: :\n:\n# → \n\n#
-    md = re.sub(r':\n:\n(#)', r'\n\n\1', md)
-    
-    # Remove single colons on their own line
-    md = re.sub(r'^\s*:\s*$', '', md, flags=re.MULTILINE)
-    
-    # Fix heading hierarchy more aggressively
-    # Convert all headings to proper hierarchy based on content
+    # Fix heading hierarchy
     def fix_heading_level(match):
         heading_level = match.group(1)
         content = match.group(2)
         
-        # Main chapter headings (usually all caps)
-        if content.isupper() and len(content) > 10:
-            return f"# {content}"
-        
-        # Subsection headings (shorter, mixed case)
-        elif len(content.strip()) < 60:
+        if heading_level == '1' and len(content.strip()) < 80:
             return f"### {content.strip()}"
         
-        # Activity headings
-        elif "Activity" in content:
-            return f"### {content.strip()}"
-        
-        # Summary headings
-        elif "Summary" in content:
-            return f"## {content.strip()}"
-        
-        # Keep original for other cases
         return match.group(0)
     
-    # Apply heading hierarchy fix
     md = re.sub(r'^(#{1,6})\s+(.+)$', fix_heading_level, md, flags=re.MULTILINE)
+    
+    # Fix spacing issues
+    md = re.sub(r'\n{3,}', '\n\n', md)  # Collapse multiple blank lines
+    md = re.sub(r'\n{3,}(#{1,6}\s)', r'\n\n\1', md)  # Fix excessive line breaks before headings
+    
+    # Fix headings merged with content
+    md = re.sub(r'(#{1,6}\s+[^#\n]+?)([A-Z][a-z])', r'\1\n\n\2', md)
+    md = re.sub(r'([^\n])\s+(#{1,6}\s)', r'\1\n\n\2', md)
+    
+    # Fix bullet lists
+    md = re.sub(r' - ([^-])', r'\n- \1', md)
+    
+    # Fix formatting
+    md = re.sub(r'--', '—', md)  # Convert double hyphens to em dash
+    md = re.sub(r'\*([^*]+)\*', r'_\1_', md)  # Convert asterisk italics to underscore
+    
+    # Fix italic artifacts
+    md = re.sub(r'__([^_]+)__', r'_\1_', md)
+    md = re.sub(r'-_([^_]+)_-', r'_\1_', md)
+    md = re.sub(r'_-([^-]+)-_', r'_\1_', md)
+    md = re.sub(r'—([a-zA-Z])', r'— \1', md)
+    
+    # Remove final artifacts
+    md = re.sub(r'^\s*:\s*$', '', md, flags=re.MULTILINE)
     
     return md.strip() + '\n'
 
@@ -965,6 +874,46 @@ def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_sta
         f'display dialog "{summary}" buttons ["OK"] default button "OK" with title "EPUB to Markdown Converter Summary"'
     ])
 
+def test_single_xhtml(xhtml_path: Path, output_dir: Path | None = None):
+    """Test function to convert a single XHTML file to Markdown and apply cleanup."""
+    if output_dir is None:
+        output_dir = Path("test_sandbox")
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Extract title for filename
+    title = extract_title_from_xhtml(xhtml_path)
+    safe_title = safe_filename(title)
+    output_filename = f"test_{safe_title}.md"
+    output_path = output_dir / output_filename
+    
+    print(f"Converting: {xhtml_path}")
+    print(f"Title: {title}")
+    print(f"Output: {output_path}")
+    
+    # Convert XHTML to Markdown using Pandoc
+    run_pandoc(xhtml_path, output_path)
+    
+    # Read the raw Markdown
+    with open(output_path, "r", encoding="utf-8") as f:
+        raw_md = f.read()
+    
+    print(f"\n=== RAW PANDOC OUTPUT ===")
+    print(raw_md[:500] + "..." if len(raw_md) > 500 else raw_md)
+    
+    # Apply cleanup
+    cleaned_md = clean_markdown_text(raw_md, None)
+    
+    print(f"\n=== AFTER CLEANUP ===")
+    print(cleaned_md[:500] + "..." if len(cleaned_md) > 500 else cleaned_md)
+    
+    # Save cleaned version
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(cleaned_md)
+    
+    print(f"\nCleaned version saved to: {output_path}")
+    return output_path
+
 def main():
     import re
     # Parse command line arguments
@@ -972,6 +921,7 @@ def main():
     parser.add_argument("epub_file", type=Path, nargs="?", help="Path to the .epub file")
     parser.add_argument("--test-xhtml", type=Path, help="Run cleanup on a single XHTML file")
     parser.add_argument("--test-cleanup", type=Path, help="Test cleanup on a single Markdown file")
+    parser.add_argument("--test-single", type=Path, help="Test single XHTML file conversion and cleanup")
     args = parser.parse_args()
 
     if args.test_cleanup:
@@ -1002,6 +952,15 @@ def main():
             with open(input_path, "w", encoding="utf-8") as f:
                 f.write(cleaned_md)
             print(f"Cleaned version saved to: {input_path}")
+        return
+
+    if args.test_single:
+        input_path = args.test_single.resolve()
+        if not input_path.exists():
+            print(f"File not found: {input_path}")
+            sys.exit(1)
+        
+        test_single_xhtml(input_path)
         return
 
     if args.test_xhtml:
