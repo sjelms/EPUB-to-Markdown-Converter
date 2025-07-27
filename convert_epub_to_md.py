@@ -64,6 +64,28 @@ def safe_filename(title: str) -> str:
 def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
     
+    # === HEADING HIERARCHY FIX ===
+    # Convert headings based on class attributes to maintain proper hierarchy
+    # This handles cases where <h1> has class="h3" and should be ### in Markdown
+    def fix_heading_hierarchy(match):
+        heading_level = match.group(1)
+        content = match.group(2)
+        
+        # If heading level is 1 but content suggests it should be lower level
+        # (e.g., h1 with class="h3"), adjust the level
+        if heading_level == '1':
+            # Check if this looks like a subsection (shorter, more specific)
+            if len(content.strip()) < 80 and any(word in content.lower() for word in ['and', 'or', 'but', 'for', 'with', 'in', 'on', 'at']):
+                return f"### {content.strip()}"
+            # Check if it's a numbered subsection (e.g., "2.1", "3.2")
+            elif re.match(r'^\d+\.\d+', content.strip()):
+                return f"### {content.strip()}"
+        
+        return match.group(0)  # Keep original if no changes needed
+    
+    # Apply heading hierarchy fix
+    md = re.sub(r'^(#{1,6})\s+(.+)$', fix_heading_hierarchy, md, flags=re.MULTILINE)
+    
     # === REMOVE EPUB ARTIFACTS ===
     
     # Remove page break elements: []{#p23 .pagebreak epub:type="pagebreak" title="23"}
@@ -72,11 +94,17 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     # Remove span/div attributes from headings: {#h2_000019 .h3 xml:space="preserve"}
     md = re.sub(r'\{#[^}]*\}\s*$', '', md, flags=re.MULTILINE)
     
+    # Remove heading attributes anywhere in the line: {#h1_000008 .h3b}
+    md = re.sub(r'\{#[^}]*\.h[0-9][a-z]?\}', '', md)
+    
     # Remove XML attributes from headings: xml:space="preserve"
     md = re.sub(r'\s+xml:space="[^"]*"', '', md)
     
     # Remove EPUB type attributes: epub:type="..."
     md = re.sub(r'\s+epub:type="[^"]*"', '', md)
+    
+    # Remove any remaining heading attributes in braces: {#h1_000020 .h3b}
+    md = re.sub(r'\s*\{#[^}]*\}\s*', ' ', md)
     
     # Remove Pandoc fenced divs (e.g., ::: {.class})
     md = re.sub(r'::: ?\{[^}]*\}', '', md)
@@ -93,6 +121,9 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     
     # Remove list item attributes: [text]{#li_000075} → text
     md = re.sub(r'\[([^\]]*?)\]\{#li_[^}]*\}', r'\1', md)
+    
+    # Remove list item brackets without attributes: [text] → text
+    md = re.sub(r'^\s*-\s*\[([^\]]+)\]$', r'- \1', md, flags=re.MULTILINE)
     
     # Remove anchor attributes: {#a_000037 xml:space="preserve"}
     md = re.sub(r'\{#a_[^}]*\}', '', md)
@@ -179,11 +210,125 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     # Remove any remaining empty brackets
     md = re.sub(r'\[\]', '', md)
     
+    # Fix orphaned opening brackets: [text without closing bracket
+    md = re.sub(r'\[([^\]\n]+)$', r'\1', md, flags=re.MULTILINE)
+    
+    # Fix orphaned brackets in the middle of text: text[ → text
+    md = re.sub(r'([^\s])\[([^\]\n]*?)$', r'\1\2', md, flags=re.MULTILINE)
+    
+    # Fix orphaned brackets in parentheses: (text[) → (text)
+    md = re.sub(r'\(([^)]*?)\[\)', r'(\1)', md)
+    
+    # Fix orphaned brackets at end of parentheses: (text).] → (text).
+    md = re.sub(r'\(([^)]*?)\)\.\]', r'(\1).', md)
+    
+    # Remove dash lines around headings and images: |--------------------------------------------------------------------+
+    md = re.sub(r'\|-{10,}\+', '', md)
+    
+    # Remove excessive dashes in table content: ----------------------------------------------------------------------------------------------------------------------------------------------------
+    md = re.sub(r' -{20,} ', ' ', md)
+    
     # Clean up excessive whitespace
     md = re.sub(r' +', ' ', md)
     
     # Ensure proper line breaks around headings
     md = re.sub(r'([^\n])\n(#)', r'\1\n\n\2', md)
+    
+    # Fix table formatting - remove excessive dashes and plus signs
+    md = re.sub(r'\+-{3,}\+', '|', md)
+    md = re.sub(r'\|-{3,}\|', '|', md)
+    
+    # Fix broken table rows - convert single column tables to proper format
+    md = re.sub(r'^\|([^|]+)\|$', r'| \1 |', md, flags=re.MULTILINE)
+    
+    # === FORMATTING IMPROVEMENTS ===
+    
+    # Convert double hyphens to em dash: -- → —
+    md = re.sub(r'--', '—', md)
+    
+    # Convert asterisk italics to underscore italics: *text* → _text_
+    md = re.sub(r'\*([^*]+)\*', r'_\1_', md)
+    
+    # Fix spacing around styled text: add spaces where missing
+    # Fix: nature of reality*Realism* → nature of reality *Realism*
+    md = re.sub(r'([a-zA-Z])\*([^*]+)\*', r'\1 *\2*', md)
+    md = re.sub(r'\*([^*]+)\*([a-zA-Z])', r'*\1* \2', md)
+    
+    # Fix spacing around italic text: add spaces where missing
+    md = re.sub(r'([a-zA-Z])_([^_]+)_', r'\1 _\2_', md)
+    md = re.sub(r'_([^_]+)_([a-zA-Z])', r'_\1_ \2', md)
+    
+    # Fix extra spaces in italic text: _ text _ → _text_
+    md = re.sub(r'_\s+([^_]+)\s+_', r'_\1_', md)
+    
+    # Fix italic formatting issues at start of paragraphs: _ text → _text
+    md = re.sub(r'^\s*_\s+([^_]+)_', r'_\1_', md, flags=re.MULTILINE)
+    
+    # Fix italic formatting issues with leading spaces: _ text_ → _text_
+    md = re.sub(r'_\s+([^_]+)_', r'_\1_', md)
+    
+    # Fix missing spaces after em dashes: Ontology —realism → Ontology — realism
+    md = re.sub(r'—([a-zA-Z])', r'— \1', md)
+    
+    # === STRAY BRACKET CLEANUP ===
+    
+    # Remove stray brackets after styled text: *text*[ → *text*
+    md = re.sub(r'\*([^*]+)\*\[', r'*\1*', md)
+    md = re.sub(r'_([^_]+)_\[', r'_\1_', md)
+    
+    # Remove stray brackets after numbers: Table 2.1[ → Table 2.1
+    md = re.sub(r'(\d+\.\d+)\[', r'\1', md)
+    md = re.sub(r'(\d+)\[', r'\1', md)
+    
+    # Remove stray brackets after words ending in numbers: Table 2.1[ → Table 2.1
+    md = re.sub(r'([A-Za-z]+\s+\d+\.\d+)\[', r'\1', md)
+    md = re.sub(r'([A-Za-z]+\s+\d+)\[', r'\1', md)
+    
+    # Remove any remaining orphaned brackets at end of lines
+    md = re.sub(r'\[$', '', md, flags=re.MULTILINE)
+    
+    # Remove stray brackets at end of sentences: [.] → .
+    md = re.sub(r'\[\.\]', '.', md)
+    
+    # Remove stray brackets at start of lines: ] → (empty)
+    md = re.sub(r'^\s*\]\s*', '', md, flags=re.MULTILINE)
+    
+    # Remove stray brackets that appear alone on lines
+    md = re.sub(r'^\s*\]\s*$', '', md, flags=re.MULTILINE)
+    
+    # Remove stray colons before headings: :\n:\n# → \n\n#
+    md = re.sub(r':\n:\n(#)', r'\n\n\1', md)
+    
+    # Remove single colons on their own line
+    md = re.sub(r'^\s*:\s*$', '', md, flags=re.MULTILINE)
+    
+    # Fix heading hierarchy more aggressively
+    # Convert all headings to proper hierarchy based on content
+    def fix_heading_level(match):
+        heading_level = match.group(1)
+        content = match.group(2)
+        
+        # Main chapter headings (usually all caps)
+        if content.isupper() and len(content) > 10:
+            return f"# {content}"
+        
+        # Subsection headings (shorter, mixed case)
+        elif len(content.strip()) < 60:
+            return f"### {content.strip()}"
+        
+        # Activity headings
+        elif "Activity" in content:
+            return f"### {content.strip()}"
+        
+        # Summary headings
+        elif "Summary" in content:
+            return f"## {content.strip()}"
+        
+        # Keep original for other cases
+        return match.group(0)
+    
+    # Apply heading hierarchy fix
+    md = re.sub(r'^(#{1,6})\s+(.+)$', fix_heading_level, md, flags=re.MULTILINE)
     
     return md.strip() + '\n'
 
@@ -805,7 +950,38 @@ def main():
     parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
     parser.add_argument("epub_file", type=Path, nargs="?", help="Path to the .epub file")
     parser.add_argument("--test-xhtml", type=Path, help="Run cleanup on a single XHTML file")
+    parser.add_argument("--test-cleanup", type=Path, help="Test cleanup on a single Markdown file")
     args = parser.parse_args()
+
+    if args.test_cleanup:
+        input_path = args.test_cleanup.resolve()
+        if not input_path.exists():
+            print(f"File not found: {input_path}")
+            sys.exit(1)
+        
+        print(f"Testing cleanup on: {input_path}")
+        with open(input_path, "r", encoding="utf-8") as f:
+            raw_md = f.read()
+        
+        print("\n=== BEFORE CLEANUP ===")
+        print(raw_md[:500] + "..." if len(raw_md) > 500 else raw_md)
+        
+        cleaned_md = clean_markdown_text(raw_md, None)
+        
+        print("\n=== AFTER CLEANUP ===")
+        print(cleaned_md[:500] + "..." if len(cleaned_md) > 500 else cleaned_md)
+        
+        # Ask if user wants to save the cleaned version
+        response = input("\nSave cleaned version? (y/n): ").lower().strip()
+        if response == 'y':
+            backup_path = input_path.with_suffix('.md.backup')
+            shutil.copy2(input_path, backup_path)
+            print(f"Backup saved to: {backup_path}")
+            
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_md)
+            print(f"Cleaned version saved to: {input_path}")
+        return
 
     if args.test_xhtml:
         input_path = args.test_xhtml.resolve()
