@@ -9,6 +9,8 @@ This project extracts and converts EPUB files into Markdown format for use in Ob
 - **Enhanced**: Extract book titles from copyright statements for better folder naming
 - **Enhanced**: Apply proper Title Case formatting to all file names
 - **Enhanced**: Robust subsection detection using comprehensive metadata extraction and anchor-based extraction
+- **NEW**: Three-phase conversion approach using markdownify for superior HTML-to-Markdown conversion
+- **NEW**: Comprehensive academic book compatibility with specialized link and formatting fixes
 - Number files using logical patterns:
   - Front matter: `00a`, `00b`, `00c`, etc.
   - Chapters: `01.0`, `01.1`, `01.2`, ..., `06.0`, `06.1`, etc., where `.0` is the chapter heading and `.1+` are its subsections
@@ -78,7 +80,7 @@ The script automatically detects and handles all these variations by parsing `ME
 
 ### 1. Input
 
-- Triggered on an `.epub` file using macOS “Run Shell Script” automation
+- Triggered on an `.epub` file using macOS "Run Shell Script" automation
 - Output is always saved to a designated directory (e.g. `~/Documents/EpubNotes/`)
 
 ### 2. Process Outline
@@ -105,18 +107,28 @@ The script automatically detects and handles all these variations by parsing `ME
    - **Enhanced**: Apply Title Case formatting to all extracted titles
    - **Enhanced**: Sequential numbering for frontmatter (00a, 00b, 00c) and chapters (01.0, 01.1, 01.2)
 
-6. **Convert XHTML to Markdown**  
-   For each `.xhtml` chapter:  
-   - Extract `<title>` from `<head>` section and apply Title Case
-   - **Enhanced**: Use TOC-driven structure for file grouping and numbering
-   - **Enhanced**: Create files based on TOC hierarchy, not individual subsections
-   - Rename output Markdown file based on TOC structure:
-     - Front matter → `00a - Preface.md`, `00b - Introduction.md`, etc.
-     - Chapters → `01.0 - Chapter Title.md`, `02.0 - Chapter Title.md`, etc.
-     - **Enhanced**: Files are numbered sequentially based on TOC order
-     - This ensures proper numeric sorting in Finder and Obsidian
-   - Convert XHTML body content to Markdown using `pandoc`  
-   - A separate function applies post-processing cleanup rules
+6. **NEW: Three-Phase XHTML to Markdown Conversion**  
+   **Phase 1: HTML Pre-processing**
+   - Parse XHTML with BeautifulSoup for structural cleanup
+   - Remove XML declarations and processing instructions
+   - Unwrap `<span>` and `<div>` tags that cause unwanted line breaks
+   - Remove EPUB-specific attributes and classes
+   - Consolidate multiple `<br>` tags
+   - Remove empty paragraphs
+   
+   **Phase 2: Markdownify Conversion**
+   - Use `markdownify` library for superior HTML-to-Markdown conversion
+   - Configure for academic book formatting (ATX headings, proper emphasis, bullet lists)
+   - Strip script and style tags
+   
+   **Phase 3: Post-processing Cleanup**
+   - Fix academic book specific patterns (table links, figure references, footnotes)
+   - Repair malformed links and image paths
+   - Remove unwanted line breaks within paragraphs (but preserve heading separation)
+   - Convert asterisk italics to underscores for consistency
+   - Fix em-dash spacing and other typographic issues
+   - Clean up table formatting and remove artifacts
+   - Restore images and links with proper Obsidian formatting
 
 7. **Update Internal Links**  
    - Convert internal links to Obsidian-friendly `[[Note Name#Heading]]` format  
@@ -138,20 +150,6 @@ The script automatically detects and handles all these variations by parsing `ME
 10. **Clean Up**
     - Remove temporary extraction directory
 
-11. **Enhanced Post-Processing Cleanup**  
-    - Clean up Markdown using comprehensive Python rules:
-      - Remove Pandoc-generated div blocks (`:::`)
-      - Strip metadata spans like `{#id .class}` and heading attributes
-      - Remove same-file anchor links (e.g. `#span_00123`)
-      - Normalize heading hierarchy (H1 for chapters, H3 for subsections)
-      - Convert double hyphens (`--`) to em dashes (`—`)
-      - Convert asterisk italics (`*text*`) to underscore italics (`_text_`)
-      - Fix spacing around styled text and remove orphaned brackets
-      - Remove stray colons and excessive line breaks
-      - Clean up table formatting and remove dash lines
-      - Rewrite internal file links to Obsidian format
-      - **New**: `--test-cleanup` flag for isolated testing of cleanup rules
-
 ---
 
 ## 🔧 Requirements
@@ -168,13 +166,19 @@ brew install pandoc
 
 Required (Python):
 ```bash
-pip install beautifulsoup4 lxml
+pip install beautifulsoup4 lxml markdownify
 ```
+
+**Note**: The script now uses `markdownify` for superior HTML-to-Markdown conversion, replacing the previous Pandoc-only approach for content processing.
 
 ---
 
 ## 🧠 Notes
 
+- **NEW**: Three-phase conversion approach provides superior results for academic books
+- **NEW**: markdownify integration eliminates many Pandoc artifacts and provides cleaner output
+- **NEW**: Specialized fixes for academic book patterns (table links, figure references, footnotes)
+- **NEW**: Intelligent line break handling that preserves heading separation while fixing paragraph breaks
 - **Enhanced**: The script now handles various EPUB structures and metadata patterns robustly
 - **Enhanced**: Book titles are extracted from copyright statements for better folder naming
 - **Enhanced**: All titles are converted to proper Title Case formatting
@@ -183,7 +187,6 @@ pip install beautifulsoup4 lxml
 - The `<title>` tag is assumed to contain the correct chapter name
 - Titles will be slugified for use in internal link resolution
 - Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be grouped based on TOC structure
-- The cleanup stage uses a dedicated Python function that can be adjusted as needed for formatting edge cases.
 - The script uses the full path to Pandoc (`/opt/homebrew/bin/pandoc`) to ensure compatibility with Automator workflows.
 - Decimal-style filenames ensure correct Obsidian navigation and file sorting (e.g., `06.0`, `06.1`, `06.2`). Front matter uses alphabetic suffixes (e.g., `00a`) and back matter uses numeric IDs (`90`, `91`, ...).
 - **Enhanced**: Comprehensive JSON logging provides detailed troubleshooting information
@@ -192,6 +195,11 @@ pip install beautifulsoup4 lxml
 
 ## 🚀 Recent Improvements ✅
 
+- ✅ **NEW: Three-Phase Conversion**: HTML pre-processing → markdownify → post-processing cleanup
+- ✅ **NEW: markdownify Integration**: Superior HTML-to-Markdown conversion for academic books
+- ✅ **NEW: Academic Book Compatibility**: Specialized fixes for table links, figure references, footnotes
+- ✅ **NEW: Intelligent Line Break Handling**: Preserves heading separation while fixing paragraph breaks
+- ✅ **NEW: Comprehensive Link Repair**: Fixes malformed academic book links and references
 - ✅ **Enhanced Metadata Extraction**: Robust detection of chapter numbers, subsections, and content types
 - ✅ **Title Case Formatting**: Proper capitalization of all file names and titles
 - ✅ **Book Title Extraction**: Automatic extraction from copyright statements for better folder naming
@@ -200,7 +208,7 @@ pip install beautifulsoup4 lxml
 - ✅ **Multi-EPUB Structure Support**: Handles various internal folder structures
 - ✅ **TOC-Driven Grouping**: Uses table of contents as primary source of truth to prevent over-extraction
 - ✅ **Enhanced Markdown Cleanup**: Comprehensive post-processing rules for Obsidian compatibility
-- ✅ **Isolated Testing**: `--test-cleanup` flag for testing cleanup rules on individual files
+- ✅ **Isolated Testing**: `--test-cleanup` and `--test-single` flags for testing individual files
 
 ## 🔮 Future Improvements
 
@@ -215,7 +223,7 @@ pip install beautifulsoup4 lxml
 
 After the script finishes processing, a macOS dialog box will appear with:
 
-- ✅ Status of each major step (Pandoc conversion, Markdown output, Cleanup, JSON log)
+- ✅ Status of each major step (Three-phase conversion, Markdown output, Cleanup, JSON log)
 - 📄 Total Markdown files created
 - 🖼️ Images copied (✅ or ⛔)
 - 🕒 Total execution time
@@ -231,15 +239,37 @@ The script now generates:
 - **📋 Comprehensive JSON Logs**: Timestamped logs with detailed metadata for troubleshooting
 - **📚 TOC-Driven File Organization**: Files properly numbered and organized based on table of contents
 - **🔧 Filename Length Management**: Automatic truncation of long titles to prevent filesystem errors
+- **🎯 Academic Book Ready**: Clean, properly formatted Markdown optimized for academic research
 
-## 🔍 TOC-Driven Grouping Approach
+## 🔍 Three-Phase Conversion Approach
 
-The script now uses a TOC-driven approach to prevent over-extraction and ensure proper file organization:
+The script now uses a sophisticated three-phase approach for superior results:
 
-- **TOC as Primary Source**: Uses table of contents hierarchy as the main guide for file grouping
-- **Prevents Over-Extraction**: Treats anchor-based subsections as part of their parent chapter files
-- **Sequential Numbering**: Assigns proper decimal numbering (01.0, 02.0, 03.0, etc.) based on TOC order
-- **Content Preservation**: Maintains full chapter content while ensuring proper structure
-- **Robust Validation**: Uses metadata extraction to validate and enhance TOC-driven decisions
+**Phase 1: HTML Pre-processing**
+- Structural cleanup using BeautifulSoup
+- Removal of EPUB-specific artifacts and attributes
+- Intelligent handling of `<span>` tags to prevent unwanted line breaks
+- Consolidation of formatting elements
 
-**Example Results**: A recent test EPUB with 13 chapters generated properly numbered files (01.0, 02.0, 03.0, etc.) without creating excessive subsection files.
+**Phase 2: markdownify Conversion**
+- Superior HTML-to-Markdown conversion
+- Academic book optimized settings
+- Clean, semantic output without Pandoc artifacts
+
+**Phase 3: Post-processing Cleanup**
+- Academic book specific pattern fixes
+- Link and image path repair
+- Intelligent line break handling
+- Obsidian compatibility optimization
+
+**Example Results**: Academic books now convert with clean formatting, proper link structure, and no unwanted artifacts, making them immediately usable in Obsidian for research work.
+
+## 🧪 Testing Features
+
+The script includes several testing modes for development and troubleshooting:
+
+- `--test-single <xhtml_file>`: Test three-phase conversion on a single XHTML file
+- `--test-cleanup <markdown_file>`: Test post-processing cleanup on existing Markdown
+- `--test-xhtml <xhtml_file>`: Test Pandoc + cleanup pipeline (legacy mode)
+
+These features allow for iterative development and testing of conversion rules.

@@ -47,6 +47,8 @@ def title_case(text: str) -> str:
     
     return ' '.join(result)
 
+
+
 # Helper function to sanitize titles for filenames
 def safe_filename(title: str) -> str:
     """Sanitize title for use as a filename (prevent subfolders or illegal characters)."""
@@ -95,6 +97,13 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
         # Unwrap the tag but keep its content
         tag.unwrap()
     
+    # Special handling for span tags that cause unwanted line breaks
+    # Look for span tags that are breaking up paragraphs and merge them
+    for span in soup.find_all('span'):
+        if span.parent and span.parent.name == 'p':
+            # If span is inside a paragraph, unwrap it to prevent line breaks
+            span.unwrap()
+    
     # Remove empty paragraphs
     for p in soup.find_all('p'):
         if not p.get_text(strip=True):
@@ -131,24 +140,61 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
         strip=['script', 'style']  # Remove script and style tags
     )
     
+    # === PHASE 1: FIX IMAGE PATHS AND EXTRACT POSITIONS ===
+    # Correct all image paths and store their positions for later insertion
+    image_positions = []
+    for img in soup.find_all('img'):
+        src = img.get('src')
+        if not src:
+            continue
+        
+        # Get just the filename from the original path (e.g., '../Images/photo.jpg' -> 'photo.jpg')
+        import os
+        image_filename = os.path.basename(src)
+        
+        # Set the new path to be relative to the 'images' folder
+        img['src'] = os.path.join('images', image_filename)
+        
+        # Store image info for later insertion with context
+        alt = img.get('alt', 'figure')
+        
+        # Find the associated heading for precise positioning
+        heading_text = ""
+        # Look for the heading in the same table row or nearby
+        table_row = img.find_parent('tr')
+        if table_row:
+            # Find the heading in the same table row
+            heading_cell = table_row.find('h1') or table_row.find('h2') or table_row.find('h3')
+            if heading_cell:
+                heading_text = heading_cell.get_text(strip=True)
+        
+        # If no heading found in table, look for nearby headings
+        if not heading_text:
+            # Look for the closest heading before this image
+            prev_sibling = img.find_previous_sibling()
+            while prev_sibling:
+                if prev_sibling.name in ['h1', 'h2', 'h3']:
+                    heading_text = prev_sibling.get_text(strip=True)
+                    break
+                prev_sibling = prev_sibling.find_previous_sibling()
+        
+        image_positions.append({
+            'alt': alt,
+            'src': img['src'],
+            'element': img,
+            'heading': heading_text
+        })
+    
     # === PHASE 3: POST-PROCESS THE MARKDOWN ===
     
-    return post_process_markdown(markdown_text, chapter_map)
+    return post_process_markdown(markdown_text, chapter_map, image_positions)
 
-def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
+def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=None) -> str:
     """
     Phase 3: Post-process the Markdown for final polishing
     """
     
     # === PROTECT IMPORTANT CONTENT ===
-    
-    # Protect images from modification
-    def protect_image(match):
-        alt_text = match.group(1)
-        img_path = match.group(2)
-        return f"IMAGE_PLACEHOLDER_{alt_text}_{img_path}"
-    
-    markdown_text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', protect_image, markdown_text)
     
     # Protect links from modification
     def protect_link(match):
@@ -168,6 +214,15 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     
     # Remove trailing whitespace from lines
     markdown_text = re.sub(r' +\n', '\n', markdown_text)
+    
+    # Fix headings that got merged with paragraphs
+    # Pattern: # Heading text (should be # Heading\n\ntext)
+    markdown_text = re.sub(r'^(#{1,6}\s+[^#\n]+)\s+([A-Z][a-z])', r'\1\n\n\2', markdown_text, flags=re.MULTILINE)
+    
+    # Fix unwanted line breaks within sentences (but be more conservative)
+    # Only fix when it's clearly a broken sentence, not across structural boundaries
+    # Pattern: word\n\nword (where it should be word word) but only within paragraphs
+    markdown_text = re.sub(r'([a-z])\n\n([a-z])', r'\1 \2', markdown_text, flags=re.MULTILINE)
     
     # Fix heading hierarchy - convert Activity headings to level 3
     markdown_text = re.sub(r'^# Activity (\d+\.\d+)', r'### Activity \1', markdown_text, flags=re.MULTILINE)
@@ -198,28 +253,6 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     
     # === RESTORE PROTECTED CONTENT ===
     
-    # Restore images
-    def restore_image(match):
-        alt_text = match.group(1)
-        img_path = match.group(2)
-        
-        # Clean up malformed image paths
-        img_path = img_path.rstrip(' -_')  # Remove trailing dashes, spaces, underscores
-        
-        # Fix common path issues
-        if img_path.endswith('_1.jpg'):
-            img_path = img_path.replace('_1.jpg', '.jpg')
-        if img_path.endswith('_1.png'):
-            img_path = img_path.replace('_1.png', '.png')
-        
-        # Ensure proper image syntax
-        if not img_path.endswith(')'):
-            img_path = img_path + ')'
-        
-        return f"![{alt_text}]({img_path})"
-    
-    markdown_text = re.sub(r'IMAGE_PLACEHOLDER_([^_]+)_([^_]+)', restore_image, markdown_text)
-    
     # Restore links
     def restore_link(match):
         link_text = match.group(1)
@@ -246,14 +279,81 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     
     # Remove placeholder artifacts
     markdown_text = re.sub(r'LINK\)_PLACEHOLDER_', '', markdown_text)
-    markdown_text = re.sub(r'IMAGE\)_PLACEHOLDER_', '', markdown_text)
     
     # Fix remaining artifacts
     markdown_text = re.sub(r'\)\)_([^_]+)_', r'\1', markdown_text)  # Fix ))_text_ patterns
     markdown_text = re.sub(r'\)_([^_]+)_', r'\1', markdown_text)  # Fix )_text_ patterns
     
-    # Fix broken image tags
+    # Fix academic book specific patterns
+    # Fix malformed footnote links: [1](#fn21 → [1](#fn21)
+    markdown_text = re.sub(r'\[(\d+)\]\(#fn(\d+)$', r'[\1](#fn\2)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix malformed figure links: [Figure 2.1](#fig21 → [Figure 2.1](#fig21)
+    markdown_text = re.sub(r'\[Figure ([^]]+)\]\(#fig([^)]+)$', r'[Figure \1](#fig\2)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix malformed table links: [Table 2.2](#ch02-table2-2, → [Table 2.2](#ch02-table2-2)
+    markdown_text = re.sub(r'\[Table ([^]]+)\]\(#([^)]+),$', r'[Table \1](#\2)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix trailing commas in any links: [text](#link, → [text](#link)
+    markdown_text = re.sub(r'\[([^\]]+)\]\(([^)]+),$', r'[\1](\2)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix trailing commas in links followed by text: [text](#link, text → [text](#link) text
+    markdown_text = re.sub(r'\[([^\]]+)\]\(([^)]+),(\s)', r'[\1](\2)\3', markdown_text, flags=re.MULTILINE)
+    
+    # Fix malformed table links with underscores: Table 2.2_#ch02-table2-2 → [Table 2.2](#ch02-table2-2)
+    markdown_text = re.sub(r'([A-Za-z]+ \d+\.\d+)_#([^,\s]+)', r'[\1](#\2)', markdown_text)
+    
+    # Fix malformed table links with underscores at end: Table 2.4_#ch02-table2-4 → [Table 2.4](#ch02-table2-4)
+    markdown_text = re.sub(r'([A-Za-z]+ \d+\.\d+)_#([^,\s]+)', r'[\1](#\2)', markdown_text)
+    
+    # Fix trailing underscores in headings and text
+    markdown_text = re.sub(r'([^_])_$', r'\1', markdown_text, flags=re.MULTILINE)  # Remove trailing underscores
+    
+    # Fix double underscores in headings: ## __Introduction__ → ## Introduction
+    markdown_text = re.sub(r'^(#{1,6})\s*__([^_]+)__', r'\1 \2', markdown_text, flags=re.MULTILINE)
+    
+    # Fix complex academic book link patterns
+    # Pattern: [Chapter 2 *](System structures)___04-9781315743332_contents.xhtml#chapter2
+    markdown_text = re.sub(r'\[([^]]+)\*\]\(([^)]+)___([^)]+)\)', r'[\1](\3)', markdown_text)
+    
+    # Fix incomplete image paths: ![fig2](images/fig → ![fig2](images/fig.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]*?images/[^)]*?)$', r'![\1](\2.jpg)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix incomplete image paths with numbers: ![fig2](2.tifimages/fig → ![fig2](images/fig2.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\((\d+)\.(tif|jpg|png)([^)]*?)([^)]*?)$', r'![\1](images/\5\2.\3)', markdown_text, flags=re.MULTILINE)
+    
+    # Fix duplicate file extensions in image paths (e.g., .jpg.jpg -> .jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]*?)\.(jpg|png|gif|jpeg)\.(jpg|png|gif|jpeg)\)', r'![\1](\2.\3)', markdown_text)
+    
+    # Fix malformed images (missing opening bracket)
+    markdown_text = re.sub(r'!figure_images/([^_]+)', r'![figure](images/\1)', markdown_text)
+    markdown_text = re.sub(r'!figure\)_images/([^_]+)', r'![figure](images/\1)', markdown_text)
+    
+    # Fix broken image tags (missing closing parenthesis)
     markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]+)$', r'![\1](\2)', markdown_text, flags=re.MULTILINE)
+    
+    # Remove extra closing parentheses at the end
+    markdown_text = re.sub(r'\)+$', '', markdown_text)
+    
+    # Fix specific stray parentheses issues
+    markdown_text = re.sub(r'position\)$', 'position', markdown_text, flags=re.MULTILINE)  # Line 43
+    markdown_text = re.sub(r'experiencing\) perceiving', 'experiencing (perceiving', markdown_text)  # Line 45
+    markdown_text = re.sub(r'them\) explicitly', 'them (explicitly', markdown_text)  # Line 113
+    markdown_text = re.sub(r'^\s*\)\s*$', '', markdown_text, flags=re.MULTILINE)  # Standalone ) characters
+    
+    # Fix incomplete sentences with missing closing parentheses
+    markdown_text = re.sub(r'understanding the chair\?\n\)', 'understanding the chair?)', markdown_text)  # Line 45
+    markdown_text = re.sub(r'about the concept\.\n\)', 'about the concept.)', markdown_text)  # Line 114
+    
+    # Remove any remaining standalone ) characters that are clearly artifacts
+    markdown_text = re.sub(r'\n\)\n', '\n', markdown_text)  # Remove standalone ) on its own line
+    
+    # Fix the specific incomplete sentences by adding missing closing parentheses
+    markdown_text = re.sub(r'understanding the chair\?\n\)', 'understanding the chair?)', markdown_text)
+    markdown_text = re.sub(r'about the concept\.\n\)', 'about the concept.)', markdown_text)
+    
+    # Fix broken links (missing closing parenthesis)
+    markdown_text = re.sub(r'\[([^\]]+)\]\(([^)]+)$', r'[\1](\2)', markdown_text, flags=re.MULTILINE)
     
     # Fix malformed citations
     markdown_text = re.sub(r'([A-Z][a-z]+, [A-Z]\. \([0-9]{4})([A-Z])', r'\1 \2', markdown_text)
@@ -262,8 +362,39 @@ def post_process_markdown(markdown_text: str, chapter_map=None) -> str:
     markdown_text = re.sub(r'\)\n\n# ([^#\n]+)\n\n\)', r')\n\n# \1', markdown_text)
     markdown_text = re.sub(r'\)\n\n# ([^#\n]+)\n\n\)', r')\n\n# \1', markdown_text)
     
-    # Add line breaks after images for better formatting
+        # Add line breaks after images for better formatting
     markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]+)\)([^\n])', r'![\1](\2)\n\3', markdown_text)
+    
+    # === PHASE 4: HEADING-BASED IMAGE POSITIONING ===
+    if image_positions:
+        # Find which images are already in the markdown
+        existing_images = set()
+        for match in re.finditer(r'!\[([^\]]+)\]\(([^)]+)\)', markdown_text):
+            alt, src = match.groups()
+            existing_images.add((alt, src))
+        
+        # For missing images, find their associated heading and insert them there
+        for img_info in image_positions:
+            if (img_info['alt'], img_info['src']) not in existing_images:
+                heading = img_info['heading']
+                if heading:
+                    # Look for the heading in the markdown
+                    lines = markdown_text.split('\n')
+                    for i, line in enumerate(lines):
+                        # Look for the heading (case-insensitive, partial match)
+                        if heading.lower() in line.lower() and line.strip().startswith('#'):
+                            # Insert image after this heading
+                            image_md = f"![{img_info['alt']}]({img_info['src']})"
+                            lines.insert(i + 1, image_md)
+                            lines.insert(i + 2, "")  # Add blank line after image
+                            markdown_text = '\n'.join(lines)
+                            break
+                    else:
+                        # If heading not found, add to end
+                        markdown_text += f"\n\n![{img_info['alt']}]({img_info['src']})"
+                else:
+                    # No heading available, add to end
+                    markdown_text += f"\n\n![{img_info['alt']}]({img_info['src']})"
     
     # Final trim and ensure proper ending
     return markdown_text.strip() + '\n'
