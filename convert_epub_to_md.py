@@ -267,6 +267,15 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     # Fix italic formatting issues with leading spaces: _ text_ → _text_
     md = re.sub(r'_\s+([^_]+)_', r'_\1_', md)
     
+    # Fix italic text with trailing spaces: _text _ → _text_
+    md = re.sub(r'_([^_]+)\s+_', r'_\1_', md)
+    
+    # Fix italic text with spaces at both ends: _ text _ → _text_
+    md = re.sub(r'_\s+([^_]+)\s+_', r'_\1_', md)
+    
+    # Remove extra spaces around italic text: text _text_ text → text _text_ text
+    md = re.sub(r'(\w)\s+_([^_]+)_\s+(\w)', r'\1 _\2_ \3', md)
+    
     # Fix missing spaces after em dashes: Ontology —realism → Ontology — realism
     md = re.sub(r'—([a-zA-Z])', r'— \1', md)
     
@@ -295,6 +304,18 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
     
     # Remove stray brackets that appear alone on lines
     md = re.sub(r'^\s*\]\s*$', '', md, flags=re.MULTILINE)
+    
+    # Remove orphaned opening brackets followed by text: [text → text
+    md = re.sub(r'\[([^\]\n]+?)(?=\s|$)', r'\1', md, flags=re.MULTILINE)
+    
+    # Remove orphaned closing brackets preceded by text: text] → text
+    md = re.sub(r'([^\s\n])\](?=\s|$)', r'\1', md, flags=re.MULTILINE)
+    
+    # Remove brackets around italic text: [_text_] → _text_
+    md = re.sub(r'\[_([^_]+)_\]', r'_\1_', md)
+    
+    # Remove brackets around text with spaces: [ text ] → text
+    md = re.sub(r'\[\s+([^\]\n]+?)\s+\]', r'\1', md, flags=re.MULTILINE)
     
     # Remove stray colons before headings: :\n:\n# → \n\n#
     md = re.sub(r':\n:\n(#)', r'\n\n\1', md)

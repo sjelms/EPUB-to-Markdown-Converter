@@ -99,21 +99,21 @@ The script automatically detects and handles all these variations by parsing `ME
    - The final summary dialog will show ✅ if images were found, or ⛔ if no images were available
 
 5. **Enhanced Metadata Extraction**  
-   - **New**: Extract comprehensive metadata from each XHTML file
-   - **Enhanced**: Search for IDs on ANY HTML tag (not just `<section>` or `<div>`)
-   - **Enhanced**: Detect chapter numbers, level-based subsections, frontmatter, and backmatter
+   - **Enhanced**: Use table of contents as primary source of truth for file grouping
+   - **Enhanced**: Prevents over-extraction by treating anchor-based subsections as part of their parent files
+   - **Enhanced**: Extract comprehensive metadata from each XHTML file for validation
    - **Enhanced**: Apply Title Case formatting to all extracted titles
-   - **Enhanced**: Extract subsections from anchor-based content within chapter files
+   - **Enhanced**: Sequential numbering for frontmatter (00a, 00b, 00c) and chapters (01.0, 01.1, 01.2)
 
 6. **Convert XHTML to Markdown**  
    For each `.xhtml` chapter:  
    - Extract `<title>` from `<head>` section and apply Title Case
-   - **Enhanced**: Use metadata-driven structure instead of TOC patterns alone
-   - **Enhanced**: Create separate files for subsections found within chapter files
-   - Rename output Markdown file based on metadata structure:
+   - **Enhanced**: Use TOC-driven structure for file grouping and numbering
+   - **Enhanced**: Create files based on TOC hierarchy, not individual subsections
+   - Rename output Markdown file based on TOC structure:
      - Front matter → `00a - Preface.md`, `00b - Introduction.md`, etc.
-     - Chapters → `01.0 - Chapter Title.md` and `01.1 - Subsection Title.md`, `01.2`, etc.
-     - **Enhanced**: Subsections are properly grouped with their parent chapters
+     - Chapters → `01.0 - Chapter Title.md`, `02.0 - Chapter Title.md`, etc.
+     - **Enhanced**: Files are numbered sequentially based on TOC order
      - This ensures proper numeric sorting in Finder and Obsidian
    - Convert XHTML body content to Markdown using `pandoc`  
    - A separate function applies post-processing cleanup rules
@@ -138,17 +138,19 @@ The script automatically detects and handles all these variations by parsing `ME
 10. **Clean Up**
     - Remove temporary extraction directory
 
-11. **Post-Processing Cleanup**  
-    - Clean up Markdown using custom Python rules:
+11. **Enhanced Post-Processing Cleanup**  
+    - Clean up Markdown using comprehensive Python rules:
       - Remove Pandoc-generated div blocks (`:::`)
-      - Strip metadata spans like `{#id .class}`
+      - Strip metadata spans like `{#id .class}` and heading attributes
       - Remove same-file anchor links (e.g. `#span_00123`)
-      - Normalize heading levels (H1 for title, H2–H6 for internal sections)
-      - Convert inline `<q>` tags to Obsidian-style block quotes (`>`)
-      - Collapse bracketed reference clusters into single paragraphs
-      - Clean up excessive line breaks
-      - Normalize reference sections
+      - Normalize heading hierarchy (H1 for chapters, H3 for subsections)
+      - Convert double hyphens (`--`) to em dashes (`—`)
+      - Convert asterisk italics (`*text*`) to underscore italics (`_text_`)
+      - Fix spacing around styled text and remove orphaned brackets
+      - Remove stray colons and excessive line breaks
+      - Clean up table formatting and remove dash lines
       - Rewrite internal file links to Obsidian format
+      - **New**: `--test-cleanup` flag for isolated testing of cleanup rules
 
 ---
 
@@ -176,10 +178,11 @@ pip install beautifulsoup4 lxml
 - **Enhanced**: The script now handles various EPUB structures and metadata patterns robustly
 - **Enhanced**: Book titles are extracted from copyright statements for better folder naming
 - **Enhanced**: All titles are converted to proper Title Case formatting
-- **Enhanced**: Subsection detection works across different HTML tag types (h1, h2, p, div, section, etc.) and handles anchor-based subsections within chapter files
+- **Enhanced**: TOC-driven grouping prevents over-extraction and ensures proper file organization
+- **Enhanced**: Comprehensive Markdown cleanup rules for Obsidian compatibility
 - The `<title>` tag is assumed to contain the correct chapter name
 - Titles will be slugified for use in internal link resolution
-- Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be merged based on metadata structure
+- Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be grouped based on TOC structure
 - The cleanup stage uses a dedicated Python function that can be adjusted as needed for formatting edge cases.
 - The script uses the full path to Pandoc (`/opt/homebrew/bin/pandoc`) to ensure compatibility with Automator workflows.
 - Decimal-style filenames ensure correct Obsidian navigation and file sorting (e.g., `06.0`, `06.1`, `06.2`). Front matter uses alphabetic suffixes (e.g., `00a`) and back matter uses numeric IDs (`90`, `91`, ...).
@@ -195,7 +198,9 @@ pip install beautifulsoup4 lxml
 - ✅ **Comprehensive JSON Logging**: Detailed logs with timestamps for troubleshooting
 - ✅ **Duplicate TOC Prevention**: Prevents creation of multiple TOC files
 - ✅ **Multi-EPUB Structure Support**: Handles various internal folder structures
-- ✅ **Robust Subsection Detection**: Works across different HTML tag types and metadata patterns, including anchor-based subsections within chapter files
+- ✅ **TOC-Driven Grouping**: Uses table of contents as primary source of truth to prevent over-extraction
+- ✅ **Enhanced Markdown Cleanup**: Comprehensive post-processing rules for Obsidian compatibility
+- ✅ **Isolated Testing**: `--test-cleanup` flag for testing cleanup rules on individual files
 
 ## 🔮 Future Improvements
 
@@ -224,17 +229,17 @@ The script now generates:
 - **📄 Title Case Files**: All files use proper Title Case formatting (e.g., "Chapter 1" not "CHAPTER 1")
 - **🔗 Single TOC File**: Only `00 - Table of Contents.md` (no duplicates)
 - **📋 Comprehensive JSON Logs**: Timestamped logs with detailed metadata for troubleshooting
-- **📚 Proper Subsection Grouping**: Subsections correctly numbered and grouped with parent chapters
+- **📚 TOC-Driven File Organization**: Files properly numbered and organized based on table of contents
 - **🔧 Filename Length Management**: Automatic truncation of long titles to prevent filesystem errors
 
-## 🔍 Subsection Extraction Capabilities
+## 🔍 TOC-Driven Grouping Approach
 
-The script now handles complex EPUB structures where subsections are embedded as anchors within chapter files:
+The script now uses a TOC-driven approach to prevent over-extraction and ensure proper file organization:
 
-- **Anchor-Based Detection**: Identifies subsections using level IDs (e.g., `level1_000001`, `level2_000002`)
-- **Dynamic File Creation**: Creates separate XHTML files for each subsection before conversion
-- **Proper Numbering**: Assigns decimal numbering (01.1, 01.2, 01.3, etc.) to subsections
-- **Content Preservation**: Extracts full subsection content while maintaining structure
-- **Robust Metadata**: Handles various subsection ID patterns and content types
+- **TOC as Primary Source**: Uses table of contents hierarchy as the main guide for file grouping
+- **Prevents Over-Extraction**: Treats anchor-based subsections as part of their parent chapter files
+- **Sequential Numbering**: Assigns proper decimal numbering (01.0, 02.0, 03.0, etc.) based on TOC order
+- **Content Preservation**: Maintains full chapter content while ensuring proper structure
+- **Robust Validation**: Uses metadata extraction to validate and enhance TOC-driven decisions
 
-**Example Results**: A recent test EPUB with 13 chapters generated 136 total files (including 123 subsections), with proper decimal numbering and grouping.
+**Example Results**: A recent test EPUB with 13 chapters generated properly numbered files (01.0, 02.0, 03.0, etc.) without creating excessive subsection files.
