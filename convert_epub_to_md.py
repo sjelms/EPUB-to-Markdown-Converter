@@ -60,41 +60,78 @@ def safe_filename(title: str) -> str:
         safe_title = safe_title[:97] + "..."
     
     return safe_title
-#!/usr/bin/env python3
+
 def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
+    
+    # === REMOVE EPUB ARTIFACTS ===
+    
+    # Remove page break elements: []{#p23 .pagebreak epub:type="pagebreak" title="23"}
+    md = re.sub(r'\[\]{#[^}]*\.pagebreak[^}]*}', '', md)
+    
+    # Remove span/div attributes from headings: {#h2_000019 .h3 xml:space="preserve"}
+    md = re.sub(r'\{#[^}]*\}\s*$', '', md, flags=re.MULTILINE)
+    
+    # Remove XML attributes from headings: xml:space="preserve"
+    md = re.sub(r'\s+xml:space="[^"]*"', '', md)
+    
+    # Remove EPUB type attributes: epub:type="..."
+    md = re.sub(r'\s+epub:type="[^"]*"', '', md)
+    
     # Remove Pandoc fenced divs (e.g., ::: {.class})
     md = re.sub(r'::: ?\{[^}]*\}', '', md)
     # Remove closing fenced divs (:::)
     md = re.sub(r':::', '', md)
+    
+    # === CLEAN TEXT CONTENT ===
+    
+    # Remove span wrappers while preserving content: [text]{#span_000130 .text} → text
+    md = re.sub(r'\[([^\]]*?)\]\{#span_[^}]*\.text\}', r'\1', md)
+    
+    # Remove other span attributes: {#span_000130 .text}
+    md = re.sub(r'\{#span_[^}]*\.text\}', '', md)
+    
+    # Remove list item attributes: [text]{#li_000075} → text
+    md = re.sub(r'\[([^\]]*?)\]\{#li_[^}]*\}', r'\1', md)
+    
+    # Remove anchor attributes: {#a_000037 xml:space="preserve"}
+    md = re.sub(r'\{#a_[^}]*\}', '', md)
+    
+    # Remove image attributes: {#img_000021 .inline xml:space="preserve"}
+    md = re.sub(r'\{#img_[^}]*\}', '', md)
+    
     # Remove same-file internal anchor links: [text](#anchor) → text
     md = re.sub(r'\[([^\]]+)\]\(#[^)]+\)', r'\1', md)
-
-    # Preserve and optionally reformat cross-file links: [text](chapter3.xhtml#Section2)
-    # These are assumed to be converted in a later step or kept as-is for Obsidian
-    # No change needed unless formatting is required
-
-    # Collapse multiple blank lines to a single blank line
-    md = re.sub(r'\n{3,}', '\n\n', md)
-    # Optionally: remove lines before first heading to clean leading content
-    lines = md.strip().splitlines()
-    for i, line in enumerate(lines):
-        if line.strip().startswith('#'):
-            md = '\n'.join(lines[i:])
-            break
-    # Remove square brackets around citation-style blocks (not links)
-    # Only unwrap if content looks like a citation (e.g., Author (Year))
-    md = re.sub(
-        r'(?<!\!)\[(.{20,}?)\](?!\()',
-        lambda m: m.group(1) if re.search(r'\w+\s+\(\d{4}', m.group(1)) else m.group(0),
-        md
-    )
-    # Convert isolated quotes followed by attribution into block quotes
-    # Matches paragraphs with quotes and attribution on separate lines
-    quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
-    md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
-
-    # Convert cross-chapter links to Obsidian-style [[filename#heading]]
+    
+    # === FIX IMAGE LINKS ===
+    
+    # Update image paths to point to images/ folder and preserve dimensions
+    def fix_image_links(match):
+        alt_text = match.group(1)
+        img_path = match.group(2)
+        # Remove any existing path and point to images folder
+        img_filename = Path(img_path).name
+        return f'![{alt_text}](images/{img_filename})'
+    
+    md = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', fix_image_links, md)
+    
+    # === ENHANCED CROSS-REFERENCE HANDLING ===
+    
+    # Convert "see chapter X" to Obsidian links
+    if chapter_map:
+        def convert_chapter_refs(match):
+            chapter_text = match.group(1)
+            chapter_num = match.group(2)
+            # Look for matching chapter in chapter_map
+            for filename, title in chapter_map.items():
+                if f"Chapter {chapter_num}" in title or f"CHAPTER {chapter_num}" in title:
+                    return f"see [[{title}]]"
+            return chapter_text  # Keep original if no match found
+        
+        md = re.sub(r'(see chapter (\d+))', convert_chapter_refs, md, flags=re.IGNORECASE)
+        md = re.sub(r'(as discussed in chapter (\d+))', convert_chapter_refs, md, flags=re.IGNORECASE)
+    
+    # Convert cross-chapter links to Obsidian-style [[filename]]
     if chapter_map:
         def replace_cross_links(match):
             text, target = match.group(1), match.group(2)
@@ -111,7 +148,43 @@ def clean_markdown_text(md: str, chapter_map=None) -> str:
                 return text  # Leave unchanged if file not found
 
         md = re.sub(r'\[([^\]]+)\]\(([^)]+\.xhtml#[^)]+)\)', replace_cross_links, md)
-
+    
+    # === PRESERVE ESSENTIAL FORMATTING ===
+    
+    # Collapse multiple blank lines to a single blank line
+    md = re.sub(r'\n{3,}', '\n\n', md)
+    
+    # Remove lines before first heading to clean leading content
+    lines = md.strip().splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith('#'):
+            md = '\n'.join(lines[i:])
+            break
+    
+    # Remove square brackets around citation-style blocks (not links)
+    # Only unwrap if content looks like a citation (e.g., Author (Year))
+    md = re.sub(
+        r'(?<!\!)\[(.{20,}?)\](?!\()',
+        lambda m: m.group(1) if re.search(r'\w+\s+\(\d{4}', m.group(1)) else m.group(0),
+        md
+    )
+    
+    # Convert isolated quotes followed by attribution into block quotes
+    # Matches paragraphs with quotes and attribution on separate lines
+    quote_block_pattern = re.compile(r'(?<=\n\n)([^>\n]{30,}?)\n\(([^)]+)\)(?=\n\n)', re.DOTALL)
+    md = quote_block_pattern.sub(lambda m: f'> {m.group(1).strip()}\n> — {m.group(2).strip()}', md)
+    
+    # === CLEAN UP REMAINING ARTIFACTS ===
+    
+    # Remove any remaining empty brackets
+    md = re.sub(r'\[\]', '', md)
+    
+    # Clean up excessive whitespace
+    md = re.sub(r' +', ' ', md)
+    
+    # Ensure proper line breaks around headings
+    md = re.sub(r'([^\n])\n(#)', r'\1\n\n\2', md)
+    
     return md.strip() + '\n'
 
 
@@ -309,7 +382,9 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
         metadata['section_id'] = primary_id
         
         # Get the type from the first tag with an ID
-        first_id_tag = body_tag.find(id=primary_id) if body_tag else None
+        first_id_tag = None
+        if body_tag and isinstance(body_tag, Tag):
+            first_id_tag = body_tag.find(id=primary_id)
         if first_id_tag and isinstance(first_id_tag, Tag):
             metadata['section_type'] = first_id_tag.get('epub:type')
     # --- END ENHANCED SECTION ---
@@ -418,7 +493,12 @@ def extract_subsections_from_xhtml(xhtml_path: Path) -> list:
     
     # Find all tags with level IDs (level1_000001, level2_000002, etc.)
     level_tags = body_tag.find_all(id=True)
-    level_tags = [tag for tag in level_tags if isinstance(tag, Tag) and tag.get('id') and isinstance(tag.get('id'), str) and re.match(r'^level\d+_', tag.get('id'))]
+    level_tags = []
+    for tag in body_tag.find_all(id=True):
+        if isinstance(tag, Tag):
+            tag_id = tag.get('id')
+            if tag_id and isinstance(tag_id, str) and re.match(r'^level\d+_', tag_id):
+                level_tags.append(tag)
     
     for tag in level_tags:
         if isinstance(tag, Tag):
