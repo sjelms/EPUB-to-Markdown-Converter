@@ -306,6 +306,14 @@ def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=
     # Fix malformed table links with underscores at end: Table 2.4_#ch02-table2-4 → [Table 2.4](#ch02-table2-4)
     markdown_text = re.sub(r'([A-Za-z]+ \d+\.\d+)_#([^,\s]+)', r'[\1](#\2)', markdown_text)
     
+    # Remove internal anchor references since we're not doing web-style navigation
+    # Pattern: [text](#anchor) → text
+    markdown_text = re.sub(r'\[([^\]]+)\]\(#([^)]+)\)', r'\1', markdown_text)
+    
+    # Fix orphaned parentheses from removed anchor references
+    # Pattern: (Table X.Y → Table X.Y
+    markdown_text = re.sub(r'\(([A-Za-z]+ \d+\.\d+)', r'\1', markdown_text)
+    
     # Fix trailing underscores in headings and text
     markdown_text = re.sub(r'([^_])_$', r'\1', markdown_text, flags=re.MULTILINE)  # Remove trailing underscores
     
@@ -510,27 +518,229 @@ def parse_toc_xhtml(toc_path: Path):
                     toc_entries.append((file_part, anchor, label, 1))
     return toc_entries
 
-def extract_book_title_from_copyright(content_root: Path) -> str | None:
-    """Extract the book title from copyright statement using RNIB_COPYRIGHT_LEGALESE_0 ID."""
-    # Look for copyright statement in all XHTML files
+def extract_book_metadata_from_copyright(content_root: Path) -> dict | None:
+    """Extract book metadata from copyright statement using RNIB_COPYRIGHT_LEGALESE IDs or fulltitle page."""
+    # First try RNIB_COPYRIGHT_LEGALESE format
     for xhtml_file in content_root.glob("*.xhtml"):
         try:
             with open(xhtml_file, 'r', encoding='utf-8') as f:
                 soup = BeautifulSoup(f, 'xml')
+            
+            metadata = {}
             
             # Look for the copyright title element
             copyright_title = soup.find('p', id='RNIB_COPYRIGHT_LEGALESE_0')
             if copyright_title:
                 title = copyright_title.get_text(strip=True)
                 if title and title != "":
+                    metadata['title'] = title
                     print(f"[INFO] Found book title from copyright: {title}")
-                    return title
+            
+            # Look for the copyright authors element
+            copyright_authors = soup.find('p', id='RNIB_COPYRIGHT_LEGALESE_1')
+            if copyright_authors:
+                authors = copyright_authors.get_text(strip=True)
+                if authors and authors != "":
+                    metadata['authors'] = authors
+                    print(f"[INFO] Found book authors from copyright: {authors}")
+            
+            # Look for the copyright ISBN element
+            copyright_isbn = soup.find('p', id='RNIB_COPYRIGHT_LEGALESE_2')
+            if copyright_isbn:
+                isbn = copyright_isbn.get_text(strip=True)
+                if isbn and isbn != "":
+                    metadata['isbn'] = isbn
+                    print(f"[INFO] Found book ISBN from copyright: {isbn}")
+            
+            if metadata:
+                return metadata
+                
         except Exception as e:
             print(f"[WARNING] Error reading {xhtml_file}: {e}")
             continue
     
-    print("[WARNING] Could not find book title in copyright statement")
+    # Fallback: Look for title and authors in fulltitle page
+    for xhtml_file in content_root.glob("*fulltitle*.xhtml"):
+        try:
+            with open(xhtml_file, 'r', encoding='utf-8') as f:
+                soup = BeautifulSoup(f, 'xml')
+            
+            metadata = {}
+            
+            # Look for book title
+            book_title = soup.find('h1', class_='book-title')
+            if book_title:
+                title = book_title.get_text(strip=True)
+                if title and title != "":
+                    metadata['title'] = title
+                    print(f"[INFO] Found book title from fulltitle: {title}")
+            
+            # Look for subtitle
+            subtitle = soup.find('p', class_='subtitle1')
+            if subtitle:
+                subtitle_text = subtitle.get_text(strip=True)
+                if subtitle_text and subtitle_text != "":
+                    if 'title' in metadata:
+                        metadata['title'] = metadata['title'] + " – " + subtitle_text
+                    print(f"[INFO] Found book subtitle: {subtitle_text}")
+            
+            # Look for authors
+            author1 = soup.find('p', class_='author1')
+            if author1:
+                authors = author1.get_text(strip=True)
+                if authors and authors != "":
+                    # Remove "EDITED BY" prefix
+                    authors = re.sub(r'^EDITED BY\s+', '', authors, flags=re.IGNORECASE)
+                    metadata['authors'] = authors
+                    print(f"[INFO] Found book authors from fulltitle: {authors}")
+            
+            if metadata:
+                return metadata
+                
+        except Exception as e:
+            print(f"[WARNING] Error reading {xhtml_file}: {e}")
+            continue
+    
+    print("[WARNING] Could not find book metadata in copyright statement or fulltitle page")
     return None
+
+def extract_book_title_from_copyright(content_root: Path) -> str | None:
+    """Extract the book title from copyright statement using RNIB_COPYRIGHT_LEGALESE_0 ID."""
+    metadata = extract_book_metadata_from_copyright(content_root)
+    return metadata.get('title') if metadata else None
+
+def find_bibtex_entry_by_title_and_authors(title: str, authors: str, bibtex_path: Path = Path("epub.bib")) -> dict | None:
+    """Find BibTeX entry by matching title and authors."""
+    if not bibtex_path.exists():
+        print(f"[WARNING] BibTeX file not found: {bibtex_path}")
+        return None
+    
+    try:
+        with open(bibtex_path, 'r', encoding='utf-8') as f:
+            bibtex_content = f.read()
+        
+        # Split into individual entries
+        entries = bibtex_content.split('@')
+        
+        for entry in entries:
+            if not entry.strip():
+                continue
+            
+            # Extract entry type and key
+            lines = entry.split('\n')
+            if not lines:
+                continue
+            
+            first_line = lines[0].strip()
+            
+            # Extract citation key - look for pattern like "BOOK{Smith2017-zx,"
+            key_match = re.search(r'\{([^,]+),', first_line)
+            if not key_match:
+                continue
+            
+            citation_key = key_match.group(1).strip()
+            
+            # Look for title and author/editor fields
+            entry_title = None
+            entry_authors = None
+            
+            for line in lines:
+                line = line.strip()
+                
+                if 'title' in line and '=' in line:
+                    # Extract title value - handle both single and double quotes
+                    title_match = re.search(r'title\s*=\s*["\']([^"\']+)["\']', line)
+                    if title_match:
+                        entry_title = title_match.group(1)
+                
+                elif ('author' in line or 'editor' in line) and '=' in line:
+                    # Extract author/editor value - handle both single and double quotes
+                    author_match = re.search(r'(author|editor)\s*=\s*["\']([^"\']+)["\']', line)
+                    if author_match:
+                        entry_authors = author_match.group(2)
+            
+            # Try to match title and authors
+            if entry_title and entry_authors:
+                # Simple fuzzy matching - check if key words match
+                title_words = set(re.findall(r'\b\w+\b', title.lower()))
+                entry_title_words = set(re.findall(r'\b\w+\b', entry_title.lower()))
+                
+                # Check for significant overlap in title words
+                title_overlap = len(title_words & entry_title_words) / max(len(title_words), 1)
+                
+                # Also check if the search title is contained in the entry title
+                title_contained = title.lower() in entry_title.lower()
+                
+                if title_overlap > 0.5 or title_contained:  # 50% overlap threshold or title contained
+                    return {
+                        'citation_key': citation_key,
+                        'title': entry_title,
+                        'authors': entry_authors
+                    }
+        
+        print(f"[WARNING] No matching BibTeX entry found for title: {title}")
+        return None
+        
+    except Exception as e:
+        print(f"[ERROR] Error parsing BibTeX file: {e}")
+        return None
+
+def parse_bibtex_authors(author_string: str) -> list:
+    """Parse BibTeX author string into list of formatted author names."""
+    if not author_string:
+        return []
+    
+    # Remove common prefixes
+    author_string = re.sub(r'^by\s+', '', author_string, flags=re.IGNORECASE)
+    
+    # Split by " and " to separate individual authors
+    authors = re.split(r'\s+and\s+', author_string)
+    
+    formatted_authors = []
+    for author in authors:
+        author = author.strip()
+        if not author:
+            continue
+        
+        # Handle "Last, First" format
+        if ',' in author and not re.search(r'\b(and|&)\b', author):
+            parts = author.split(',', 1)
+            if len(parts) == 2:
+                last_name = parts[0].strip()
+                first_name = parts[1].strip()
+                formatted_author = f"{first_name} {last_name}"
+            else:
+                formatted_author = author
+        else:
+            formatted_author = author
+        
+        formatted_authors.append(formatted_author)
+    
+    return formatted_authors
+
+def generate_yaml_header(title: str, chapter: str, authors: list, citation_key: str, toc_filename: str) -> str:
+    """Generate YAML header for Obsidian Markdown files."""
+    yaml_lines = ["---"]
+    
+    # Convert colons to hyphens in title to prevent YAML formatting issues
+    safe_title = title.replace(":", " - ")
+    yaml_lines.append(f"title: {safe_title}")
+    
+    # Remove .md extension from chapter
+    chapter_without_ext = chapter.replace(".md", "")
+    yaml_lines.append(f"chapter: {chapter_without_ext}")
+    
+    yaml_lines.append(f'toc: "[[{toc_filename.replace(".md", "")}]]"')
+    
+    # Add authors
+    for i, author in enumerate(authors, 1):
+        yaml_lines.append(f'author-{i}: "[[{author}]]"')
+    
+    # Add citation key
+    yaml_lines.append(f'citation-key: "[[@{citation_key}]]"')
+    yaml_lines.append("---")
+    
+    return "\n".join(yaml_lines)
 
 def extract_title_from_xhtml(xhtml_path: Path) -> str:
     """Extracts the <title> from an XHTML file and converts to Title Case."""
@@ -934,7 +1144,7 @@ def build_toc_driven_structure(toc_entries, content_root: Path) -> tuple:
 
 # === CLI ===
 
-def generate_obsidian_toc(conversion_log, output_dir: Path):
+def generate_obsidian_toc(conversion_log, output_dir: Path, book_title: str = None):
     """Create a Markdown-formatted TOC compatible with Obsidian based on actual output files."""
     toc_lines = ["# Table of Contents", ""]
     
@@ -968,10 +1178,20 @@ def generate_obsidian_toc(conversion_log, output_dir: Path):
         toc_lines.append(f"{indent}- [[{toc_link}]]")
     
     toc_text = "\n".join(toc_lines)
-    toc_path = output_dir / "00 - Table of Contents.md"
+    
+    # Create unique TOC filename based on book title
+    if book_title:
+        safe_book_title = safe_filename(book_title)
+        toc_filename = f"00 - TOC for {safe_book_title}.md"
+    else:
+        toc_filename = "00 - Table of Contents.md"
+    
+    toc_path = output_dir / toc_filename
     with open(toc_path, "w", encoding="utf-8") as f:
         f.write(toc_text)
     print(f"TOC written to: {toc_path}")
+    
+    return toc_filename
 
 def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_status=True, json_status=True):
     """Displays a summary dialog on macOS using AppleScript."""
@@ -1449,12 +1669,56 @@ def main():
     # Generate Obsidian-compatible Table of Contents file
     # This creates the main TOC file with proper Obsidian links
     # The toc.xhtml file has been excluded from content processing above to prevent duplicates
-    toc_path = output_dir / "00 - Table of Contents.md"
-    if not toc_path.exists():
-        generate_obsidian_toc(conversion_log, output_dir)
-        print(f"[INFO] Generated Obsidian-compatible TOC: {toc_path}")
+    toc_filename = generate_obsidian_toc(conversion_log, output_dir, book_title)
+    toc_path = output_dir / toc_filename
+    print(f"[INFO] Generated Obsidian-compatible TOC: {toc_path}")
+
+    # --- PHASE 5: YAML Header Injection Phase ---
+    # Extract book metadata and generate YAML headers
+    book_metadata = extract_book_metadata_from_copyright(content_root)
+    
+    if book_metadata:
+        title = book_metadata.get('title', '')
+        authors_string = book_metadata.get('authors', '')
+        
+        # Find matching BibTeX entry
+        bibtex_entry = find_bibtex_entry_by_title_and_authors(title, authors_string)
+        
+        if bibtex_entry:
+            citation_key = bibtex_entry['citation_key']
+            bibtex_authors = parse_bibtex_authors(bibtex_entry['authors'])
+            
+            # Generate YAML headers for all chapters
+            for entry in conversion_log["chapters"]:
+                md_path = output_dir / entry["output_file"]
+                if not md_path.exists():
+                    continue
+                
+                # Read current content
+                with open(md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                
+                # Generate YAML header using the full title from BibTeX entry
+                yaml_header = generate_yaml_header(
+                    title=bibtex_entry['title'],  # Use full title from BibTeX
+                    chapter=entry["output_file"],
+                    authors=bibtex_authors,
+                    citation_key=citation_key,
+                    toc_filename=toc_filename
+                )
+                
+                # Prepend YAML header to content
+                new_content = yaml_header + "\n\n" + content
+                
+                # Write back to file
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                
+                print(f"[Phase 5] Added YAML header to: {entry['output_file']}")
+        else:
+            print(f"[WARNING] No matching BibTeX entry found for book: {title}")
     else:
-        print(f"[INFO] TOC file already exists, skipping generation")
+        print(f"[WARNING] No book metadata found for YAML header generation")
 
     # Add runtime metadata before writing log
     from datetime import datetime
