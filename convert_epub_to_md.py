@@ -49,8 +49,17 @@ def title_case(text: str) -> str:
 # Helper function to sanitize titles for filenames
 def safe_filename(title: str) -> str:
     """Sanitize title for use as a filename (prevent subfolders or illegal characters)."""
-    # Convert colons to hyphens and remove other problematic characters
-    return re.sub(r'[\\/:"*?<>|]', '-', title)
+    # First sanitize the title
+    safe_title = re.sub(r'[\\/:"*?<>|]', '-', title)
+    
+    # Limit filename length to prevent filesystem errors
+    # Most filesystems have a limit of 255 characters for filename
+    # We'll use a more conservative limit of 100 characters
+    if len(safe_title) > 100:
+        # Truncate and add ellipsis
+        safe_title = safe_title[:97] + "..."
+    
+    return safe_title
 #!/usr/bin/env python3
 def clean_markdown_text(md: str, chapter_map=None) -> str:
     """Apply post-processing cleanup rules to raw Markdown."""
@@ -268,7 +277,8 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
         'is_backmatter': False,
         'chapter_number': None,
         'level': None,
-        'subsection_number': None
+        'subsection_number': None,
+        'all_ids': []  # NEW: Track all IDs in the file
     }
     
     # Extract title
@@ -283,15 +293,23 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
         metadata['body_type'] = body_tag.get('epub:type')
     
     # --- ENHANCED SECTION ID DETECTION ---
-    # Find the first tag in the body that has an ID attribute. This is more robust.
-    # This fixes the issue where level IDs (like level1_000001) are placed on various tags
-    # (h1, h2, p, etc.) rather than just section or div tags.
-    tag_with_id = None
+    # Find ALL tags in the body that have ID attributes, not just the first one
+    # This is crucial for detecting subsections that are anchors within the same file
     if body_tag and isinstance(body_tag, Tag):
-        tag_with_id = body_tag.find(id=True)
-    if tag_with_id and isinstance(tag_with_id, Tag):
-        metadata['section_id'] = tag_with_id.get('id')
-        metadata['section_type'] = tag_with_id.get('epub:type')
+        all_id_tags = body_tag.find_all(id=True)
+        for tag in all_id_tags:
+            if isinstance(tag, Tag) and tag.get('id'):
+                metadata['all_ids'].append(tag.get('id'))
+    
+    # Use the first ID for primary classification (usually the main section/chapter ID)
+    if metadata['all_ids']:
+        primary_id = metadata['all_ids'][0]
+        metadata['section_id'] = primary_id
+        
+        # Get the type from the first tag with an ID
+        first_id_tag = body_tag.find(id=primary_id) if body_tag else None
+        if first_id_tag and isinstance(first_id_tag, Tag):
+            metadata['section_type'] = first_id_tag.get('epub:type')
     # --- END ENHANCED SECTION ---
     
     # Determine content type based on metadata
@@ -381,6 +399,65 @@ def extract_xhtml_metadata(xhtml_path: Path) -> dict:
     
     return metadata
 
+def extract_subsections_from_xhtml(xhtml_path: Path) -> list:
+    """
+    Extract all subsections from an XHTML file based on level IDs.
+    Returns a list of subsection metadata for files that contain multiple subsections.
+    This handles the case where subsections are anchors within the same XHTML file as the chapter.
+    """
+    with open(xhtml_path, 'r', encoding='utf-8') as f:
+        soup = BeautifulSoup(f, 'xml')
+    
+    subsections = []
+    body_tag = soup.find('body')
+    
+    if not body_tag or not isinstance(body_tag, Tag):
+        return subsections
+    
+    # Find all tags with level IDs (level1_000001, level2_000002, etc.)
+    level_tags = body_tag.find_all(id=True)
+    level_tags = [tag for tag in level_tags if isinstance(tag, Tag) and tag.get('id') and isinstance(tag.get('id'), str) and re.match(r'^level\d+_', tag.get('id'))]
+    
+    for tag in level_tags:
+        if isinstance(tag, Tag):
+            section_id = tag.get('id', '')
+            if not section_id or not isinstance(section_id, str):
+                continue
+            
+            # Parse level and subsection number
+            parts = section_id.split('_')
+            if len(parts) >= 2:
+                level_part = parts[0]
+                if level_part.startswith('level'):
+                    try:
+                        level = int(level_part[5:])
+                        # Extract subsection number
+                        match = re.search(r'\d+', parts[1])
+                        subsection_num = int(match.group()) if match else 0
+                        
+                        # Extract title from the tag content
+                        title = tag.get_text(strip=True)
+                        if not title:
+                            # Try to find a heading within this tag
+                            heading = tag.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                            if heading and isinstance(heading, Tag):
+                                title = heading.get_text(strip=True)
+                        
+                        if title:
+                            subsections.append({
+                                'section_id': section_id,
+                                'level': level,
+                                'subsection_number': subsection_num,
+                                'title': title_case(title),
+                                'tag_name': tag.name
+                            })
+                    except (ValueError, AttributeError):
+                        continue
+    
+    # Sort subsections by level and subsection number
+    subsections.sort(key=lambda x: (x['level'], x['subsection_number']))
+    return subsections
+
 def is_chapter_boundary(title: str, label: str) -> bool:
     """
     Determine if a TOC entry represents a new chapter boundary.
@@ -450,6 +527,8 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
     """
     Build chapter structure based on XHTML metadata instead of TOC patterns.
     Returns (chapter_groups, front_matter, backmatter) with proper organization.
+    
+    ENHANCED: Now handles subsections that are anchors within the same XHTML file as chapters.
     """
     # Extract metadata for all files
     file_metadata = {}
@@ -467,6 +546,19 @@ def build_metadata_driven_structure(toc_entries, content_root: Path) -> tuple:
         if xhtml_file.name not in file_metadata:
             file_metadata[xhtml_file.name] = extract_xhtml_metadata(xhtml_file)
             print(f"[DEBUG] {xhtml_file.name}: section_id='{file_metadata[xhtml_file.name]['section_id']}', level={file_metadata[xhtml_file.name]['level']}")
+    
+    # NEW: Extract subsections from chapter files that contain multiple subsections
+    chapter_subsections = {}  # Maps chapter file to list of subsection metadata
+    for file, metadata in file_metadata.items():
+        if metadata['is_chapter'] and metadata['all_ids']:
+            # Check if this chapter file contains level IDs (subsections)
+            level_ids = [id_val for id_val in metadata['all_ids'] if isinstance(id_val, str) and id_val.startswith('level')]
+            if level_ids:
+                print(f"[INFO] Chapter {file} contains {len(level_ids)} subsections")
+                subsections = extract_subsections_from_xhtml(content_root / file)
+                if subsections:
+                    chapter_subsections[file] = subsections
+                    print(f"[INFO] Extracted {len(subsections)} subsections from {file}")
     
     # First pass: identify chapters and build chapter map
     chapter_map = {}  # Maps chapter number to list of files
@@ -834,6 +926,70 @@ def main():
         print(f"  → {f}")
     
     print("=" * 50)
+    
+    # NEW: Extract subsections from chapter files and create separate files for each subsection
+    print("\n=== EXTRACTING SUBSECTIONS ===")
+    subsection_files = {}  # Maps original file to list of subsection file names
+    
+    for chapter_num, title, files in chapter_groups:
+        for file in files:
+            xhtml_path = content_root / file
+            subsections = extract_subsections_from_xhtml(xhtml_path)
+            if subsections:
+                print(f"[INFO] Found {len(subsections)} subsections in {file}")
+                subsection_files[file] = []
+                
+                # Create separate files for each subsection
+                for i, subsection in enumerate(subsections):
+                    subsection_filename = f"{file.replace('.xhtml', '')}_subsection_{i+1:03d}.xhtml"
+                    subsection_files[file].append(subsection_filename)
+                    
+                    # Create a new XHTML file for this subsection
+                    subsection_path = content_root / subsection_filename
+                    
+                    # Read the original file and extract just this subsection
+                    with open(xhtml_path, 'r', encoding='utf-8') as f:
+                        soup = BeautifulSoup(f, 'xml')
+                    
+                    # Find the subsection tag
+                    subsection_tag = soup.find(id=subsection['section_id'])
+                    if subsection_tag and isinstance(subsection_tag, Tag):
+                        # Create a new XHTML structure for this subsection
+                        new_soup = BeautifulSoup('<?xml version="1.0" encoding="UTF-8"?>', 'xml')
+                        html_tag = new_soup.new_tag('html')
+                        html_tag['xmlns'] = 'http://www.w3.org/1999/xhtml'
+                        new_soup.append(html_tag)
+                        
+                        head_tag = new_soup.new_tag('head')
+                        html_tag.append(head_tag)
+                        
+                        title_tag = new_soup.new_tag('title')
+                        title_tag.string = subsection['title']
+                        head_tag.append(title_tag)
+                        
+                        body_tag = new_soup.new_tag('body')
+                        html_tag.append(body_tag)
+                        
+                        # Copy the subsection content
+                        body_tag.append(subsection_tag)
+                        
+                        # Write the new subsection file
+                        with open(subsection_path, 'w', encoding='utf-8') as f:
+                            f.write(str(new_soup))
+                        
+                        print(f"  → Created subsection file: {subsection_filename}")
+    
+    # Update chapter groups to include subsection files
+    updated_chapter_groups = []
+    for chapter_num, title, files in chapter_groups:
+        updated_files = []
+        for file in files:
+            updated_files.append(file)  # Add the original chapter file
+            if file in subsection_files:
+                updated_files.extend(subsection_files[file])  # Add subsection files
+        updated_chapter_groups.append((chapter_num, title, updated_files))
+    
+    chapter_groups = updated_chapter_groups
 
     conversion_log["chapter_groups"] = [
         {"chapter_num": f"{num:02d}", "title": title, "files": group}

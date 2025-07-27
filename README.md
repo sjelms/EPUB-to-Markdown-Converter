@@ -8,7 +8,7 @@ This project extracts and converts EPUB files into Markdown format for use in Ob
 - Convert `.xhtml` files to `.md` using filenames and structure derived from `toc.xhtml`
 - **Enhanced**: Extract book titles from copyright statements for better folder naming
 - **Enhanced**: Apply proper Title Case formatting to all file names
-- **Enhanced**: Robust subsection detection using comprehensive metadata extraction
+- **Enhanced**: Robust subsection detection using comprehensive metadata extraction and anchor-based extraction
 - Number files using logical patterns:
   - Front matter: `00a`, `00b`, `00c`, etc.
   - Chapters: `01.0`, `01.1`, `01.2`, ..., `06.0`, `06.1`, etc., where `.0` is the chapter heading and `.1+` are its subsections
@@ -29,14 +29,48 @@ An EPUB file is essentially a `.zip` archive containing:
 ```
 /mimetype
 /META-INF/container.xml
-/OEBPS/ (or other root directory)
+```
+
+The content directory structure varies between EPUBs. Common variations include:
+
+### **Structure A: OEBPS Root**
+```
+/OEBPS/
   ├── *.xhtml (chapters)
   ├── toc.ncx (navigation XML)
   ├── toc.xhtml (HTML-based TOC)
+  ├── content.opf
   ├── images/
   ├── css/
   ├── fonts/
 ```
+
+### **Structure B: OEBPS with HTML Subdirectory**
+```
+/OEBPS/
+  ├── html/
+  │   ├── *.xhtml (chapters)
+  │   └── toc.xhtml (HTML-based TOC)
+  ├── toc.ncx (navigation XML)
+  ├── content.opf
+  ├── images/
+  ├── css/
+  └── fonts/
+```
+
+### **Structure C: EPUB Root**
+```
+/EPUB/
+  ├── *.xhtml (chapters)
+  ├── toc.ncx (navigation XML)
+  ├── toc.xhtml (HTML-based TOC)
+  ├── content.opf
+  ├── images/
+  ├── css/
+  └── fonts/
+```
+
+The script automatically detects and handles all these variations by parsing `META-INF/container.xml` to locate the correct content root.
 
 ---
 
@@ -69,11 +103,13 @@ An EPUB file is essentially a `.zip` archive containing:
    - **Enhanced**: Search for IDs on ANY HTML tag (not just `<section>` or `<div>`)
    - **Enhanced**: Detect chapter numbers, level-based subsections, frontmatter, and backmatter
    - **Enhanced**: Apply Title Case formatting to all extracted titles
+   - **Enhanced**: Extract subsections from anchor-based content within chapter files
 
 6. **Convert XHTML to Markdown**  
    For each `.xhtml` chapter:  
    - Extract `<title>` from `<head>` section and apply Title Case
    - **Enhanced**: Use metadata-driven structure instead of TOC patterns alone
+   - **Enhanced**: Create separate files for subsections found within chapter files
    - Rename output Markdown file based on metadata structure:
      - Front matter → `00a - Preface.md`, `00b - Introduction.md`, etc.
      - Chapters → `01.0 - Chapter Title.md` and `01.1 - Subsection Title.md`, `01.2`, etc.
@@ -140,7 +176,7 @@ pip install beautifulsoup4 lxml
 - **Enhanced**: The script now handles various EPUB structures and metadata patterns robustly
 - **Enhanced**: Book titles are extracted from copyright statements for better folder naming
 - **Enhanced**: All titles are converted to proper Title Case formatting
-- **Enhanced**: Subsection detection works across different HTML tag types (h1, h2, p, div, section, etc.)
+- **Enhanced**: Subsection detection works across different HTML tag types (h1, h2, p, div, section, etc.) and handles anchor-based subsections within chapter files
 - The `<title>` tag is assumed to contain the correct chapter name
 - Titles will be slugified for use in internal link resolution
 - Chapters may span multiple .xhtml files (e.g., chapter7, chapter7a, chapter7b) — these will be merged based on metadata structure
@@ -159,7 +195,7 @@ pip install beautifulsoup4 lxml
 - ✅ **Comprehensive JSON Logging**: Detailed logs with timestamps for troubleshooting
 - ✅ **Duplicate TOC Prevention**: Prevents creation of multiple TOC files
 - ✅ **Multi-EPUB Structure Support**: Handles various internal folder structures
-- ✅ **Robust Subsection Detection**: Works across different HTML tag types and metadata patterns
+- ✅ **Robust Subsection Detection**: Works across different HTML tag types and metadata patterns, including anchor-based subsections within chapter files
 
 ## 🔮 Future Improvements
 
@@ -189,3 +225,16 @@ The script now generates:
 - **🔗 Single TOC File**: Only `00 - Table of Contents.md` (no duplicates)
 - **📋 Comprehensive JSON Logs**: Timestamped logs with detailed metadata for troubleshooting
 - **📚 Proper Subsection Grouping**: Subsections correctly numbered and grouped with parent chapters
+- **🔧 Filename Length Management**: Automatic truncation of long titles to prevent filesystem errors
+
+## 🔍 Subsection Extraction Capabilities
+
+The script now handles complex EPUB structures where subsections are embedded as anchors within chapter files:
+
+- **Anchor-Based Detection**: Identifies subsections using level IDs (e.g., `level1_000001`, `level2_000002`)
+- **Dynamic File Creation**: Creates separate XHTML files for each subsection before conversion
+- **Proper Numbering**: Assigns decimal numbering (01.1, 01.2, 01.3, etc.) to subsections
+- **Content Preservation**: Extracts full subsection content while maintaining structure
+- **Robust Metadata**: Handles various subsection ID patterns and content types
+
+**Example Results**: A recent test EPUB with 13 chapters generated 136 total files (including 123 subsections), with proper decimal numbering and grouping.
