@@ -1,3 +1,14 @@
+import subprocess
+
+# Helper function to show a macOS dialog (restored for completion notification)
+def show_completion_dialog(message: str):
+    try:
+        subprocess.run([
+            "osascript", "-e",
+            f'display dialog "{message}" with title "EPUB to Markdown" buttons ["OK"] default button "OK"'
+        ])
+    except Exception as e:
+        print(f"[WARNING] Unable to display completion dialog: {e}")
 # === Helper functions for frontmatter and backmatter detection ===
 def is_frontmatter_file(filename: str, title: str = "") -> bool:
     lower_name = filename.lower()
@@ -1251,6 +1262,7 @@ def build_spine_driven_structure(opf_soup, content_root: Path) -> tuple:
     import re
     from collections import defaultdict
     from pathlib import Path
+
     # Group files by numeric prefix (e.g., chapter010, chapter010-01, etc.)
     chapter_files = defaultdict(list)
     for file in spine_files:
@@ -1262,25 +1274,56 @@ def build_spine_driven_structure(opf_soup, content_root: Path) -> tuple:
         else:
             chapter_files[file].append(file)  # fallback
 
-    # Sort groups by inferred order
-    sorted_keys = sorted(chapter_files.keys())
-    chapter_groups = []
+    # --- NEW LOGIC: Collect, sort, and index chapter groups ---
+    import re
+
+    def extract_numeric_prefix(title: str) -> int:
+        match = re.match(r"^\s*(\d{1,3})[\.\):\-\s]", title.strip())
+        return int(match.group(1)) if match else 9999
+
+    # Build initial chapter groups
+    unsorted_chapter_groups = []
     frontmatter_files = []
     backmatter_files = []
 
-    chapter_index = 1
-    for key in sorted_keys:
+    for key in sorted(chapter_files.keys()):
         files = sorted(chapter_files[key])
         first_file = files[0]
         title = extract_title_from_xhtml(content_root / first_file)
-        # Use the same logic for front/back matter as previously
         if is_frontmatter_file(first_file, title):
             frontmatter_files.extend(files)
         elif is_backmatter_file(first_file, title):
             backmatter_files.extend(files)
         else:
-            chapter_groups.append((chapter_index, title or key, files))
-            chapter_index += 1
+            unsorted_chapter_groups.append((title or key, files))
+
+    # Sort by numeric prefix in title
+    unsorted_chapter_groups.sort(key=lambda x: extract_numeric_prefix(x[0]))
+
+    # Assign chapter numbers sequentially
+    chapter_groups = []
+    for i, (title, files) in enumerate(unsorted_chapter_groups, start=1):
+        chapter_groups.append((i, title, files))
+
+    # --- Reclassify any chapter group with a title or filename match ---
+    reclassified = []
+    # Copy so we can remove from chapter_groups during iteration
+    for group in chapter_groups[:]:
+        _, title, files = group
+        if not files:
+            continue
+        first_file = files[0]
+        if is_frontmatter_file(first_file, title):
+            frontmatter_files.extend(files)
+            chapter_groups.remove(group)
+            reclassified.append((title, "front"))
+        elif is_backmatter_file(first_file, title):
+            backmatter_files.extend(files)
+            chapter_groups.remove(group)
+            reclassified.append((title, "back"))
+
+    if reclassified:
+        print(f"[INFO] Reclassified {len(reclassified)} misfiled chapters as front/back matter.")
 
     # Print summary
     print(f"Frontmatter files: {len(frontmatter_files)}")
@@ -1418,7 +1461,7 @@ def convert_book(
     import shutil
     import json
     from pathlib import Path
-    from datetime import datetime
+    from datetime import datetime, timezone
     import time
 
     # Start timer for elapsed time
@@ -1435,7 +1478,7 @@ def convert_book(
     epub_abs_path = str(epub_file.resolve())
     SCRIPT_VERSION = "v0.9.0-beta"
     
-    start_timestamp = datetime.utcnow().isoformat() + "Z"
+    start_timestamp = datetime.now(timezone.utc).isoformat()
     
     # Initialize conversion_log
     conversion_log = {
@@ -1517,8 +1560,10 @@ def convert_book(
     # --- TOC source detection (nav.xhtml and toc.ncx) ---
     manifest_items = []
     manifest_tag = opf_soup.find("manifest")
-    if manifest_tag:
+    if manifest_tag and hasattr(manifest_tag, "find_all"):
         for item in manifest_tag.find_all("item"):
+            if not isinstance(item, Tag):
+                continue
             item_dict = {
                 "id": item.get("id"),
                 "href": item.get("href"),
@@ -1800,7 +1845,7 @@ def convert_book(
         print(f"[WARNING] No book metadata found for YAML header generation")
     
     # Add runtime metadata
-    end_timestamp = datetime.utcnow().isoformat() + "Z"
+    end_timestamp = datetime.now(timezone.utc).isoformat()
     conversion_log["end_time_utc"] = end_timestamp
     conversion_log["total_output_files"] = len(conversion_log["chapters"])
     
@@ -1816,7 +1861,7 @@ def convert_book(
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
     
-    # Show macOS summary dialog (uncommented for macOS)
+    # Show macOS summary dialog (styled, single dialog at end)
     show_final_dialog(conversion_log, time.time() - start, md_status=True, cleanup_status=True, json_status=True)
     return conversion_log
 
