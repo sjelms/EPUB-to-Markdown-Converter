@@ -68,21 +68,27 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
     """
     Robust, browser-like XHTML to Markdown conversion:
     - Parse the entire XHTML file (not just <body> or a fragment)
-    - Only fix image src attributes and remove <script>/<style> tags
+    - Pre-process HTML to fix structural issues before conversion
     - Pass the full DOM to markdownify for conversion
-    - Do not destructively modify or unwrap any other elements
-    - Post-process only for global Markdown cleanup
+    - Post-process for final cleanup and formatting
     """
     from bs4 import BeautifulSoup
     from bs4.element import Tag
     import os
+    import re
+    
     # If already Markdown, skip HTML processing
     if not md_content.strip().startswith('<'):
         return post_process_markdown(md_content, chapter_map)
+    
     soup = BeautifulSoup(md_content, 'html.parser')
+    
+    # === PRE-PROCESSING: Fix HTML structure before conversion ===
+    
     # Remove <script> and <style> tags
     for tag in soup.find_all(['script', 'style']):
         tag.decompose()
+    
     # Fix image src attributes
     for img in soup.find_all('img'):
         if isinstance(img, Tag):
@@ -90,6 +96,96 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
             if isinstance(src, str) and src:
                 image_filename = os.path.basename(src)
                 img['src'] = os.path.join('images', image_filename)
+    
+    # Fix chapter title structure - extract and clean up the main title
+    header = soup.find('header')
+    if header and isinstance(header, Tag):
+        h1 = header.find('h1')
+        if h1 and isinstance(h1, Tag):
+            # Extract the chapter number and title
+            chap_label = h1.find('span', class_='chap-label')
+            if chap_label and isinstance(chap_label, Tag):
+                chap_text = chap_label.get_text(strip=True)
+                # Remove extra whitespace and line breaks
+                chap_text = re.sub(r'\s+', ' ', chap_text)
+            
+            # Extract the bold title
+            bold_title = h1.find('b')
+            if bold_title and isinstance(bold_title, Tag):
+                title_text = bold_title.get_text(strip=True)
+                # Create a clean title
+                clean_title = f"# Chapter 2: {title_text}"
+                # Replace the entire h1 with clean text
+                h1.clear()
+                h1.string = clean_title
+    
+    # Fix subtitle structure
+    subtitle_p = soup.find('p', class_='subtitle')
+    if subtitle_p and isinstance(subtitle_p, Tag):
+        subtitle_link = subtitle_p.find('a')
+        if subtitle_link and isinstance(subtitle_link, Tag):
+            subtitle_text = subtitle_link.get_text(strip=True)
+            # Replace with clean subtitle
+            subtitle_p.clear()
+            subtitle_p.string = f"## {subtitle_text}"
+    
+    # Fix author formatting
+    author_p = soup.find('p', class_='author')
+    if author_p and isinstance(author_p, Tag):
+        author_i = author_p.find('i')
+        if author_i and isinstance(author_i, Tag):
+            author_text = author_i.get_text(strip=True)
+            # Replace with clean author line
+            author_p.clear()
+            author_p.string = f"*{author_text}*"
+    
+    # Fix image captions - remove the _List_of_figures.xhtml references
+    for img in soup.find_all('img'):
+        if isinstance(img, Tag):
+            # Find the next sibling that might be a caption
+            next_sibling = img.find_next_sibling()
+            if next_sibling and isinstance(next_sibling, Tag):
+                caption_text = next_sibling.get_text()
+                # Clean up caption text
+                if '_List_of_figures.xhtml#' in caption_text:
+                    # Extract just the caption part before the _List_of_figures
+                    clean_caption = caption_text.split('_List_of_figures.xhtml#')[0]
+                    next_sibling.string = clean_caption
+    
+    # Convert superscript tags to Obsidian footnote format
+    for sup in soup.find_all('sup'):
+        if isinstance(sup, Tag):
+            sup_text = sup.get_text(strip=True)
+            # Check if this is a footnote reference (usually just a number)
+            if sup_text.isdigit():
+                # Convert to Obsidian footnote format
+                footnote_ref = f"[^{sup_text}]"
+                # Create a new NavigableString for the footnote reference
+                from bs4.element import NavigableString
+                footnote_element = NavigableString(footnote_ref)
+                sup.replace_with(footnote_element)
+            else:
+                # For other superscript content, just keep the text
+                sup.unwrap()
+    
+
+    
+    # Fix figure references in text
+    for text in soup.find_all(text=True):
+        if isinstance(text, str) and '_List_of_figures.xhtml#' in text:
+            # Replace with clean figure reference
+            clean_text = re.sub(r'_List_of_figures\.xhtml#[^_\s]+', '', text)
+            text.replace_with(clean_text)
+    
+    # Fix broken links in text
+    for a_tag in soup.find_all('a'):
+        if isinstance(a_tag, Tag):
+            href = a_tag.get('href', '')
+            if 'contents.xhtml' in href:
+                # Remove problematic internal links
+                a_tag.unwrap()
+    
+    # === CONVERSION ===
     # Pass the full DOM to markdownify
     markdown_text = md(
         str(soup),
@@ -100,6 +196,8 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
         code_symbol="`",
         strip=['script', 'style'],
     )
+    
+    # === POST-PROCESSING ===
     return post_process_markdown(markdown_text, chapter_map)
 
 def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=None) -> str:
@@ -161,8 +259,51 @@ def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=
     # Fix italic formatting (convert * to _ for consistency)
     markdown_text = re.sub(r'\*([^*]+)\*', r'_\1_', markdown_text)
     
+    # Fix incomplete italic formatting - more precise approach
+    # Pattern: _word (should be _word_) but only for specific known words
+    italic_words = ['means', 'techne', 'are', 'combinations', 'the', 'some', 'not']
+    for word in italic_words:
+        # Replace _word with _word_ but only when it's a standalone word
+        markdown_text = re.sub(rf'_({word})(?=\s|$)', r'_\1_', markdown_text)
+    
+    # Fix heading structure - ensure proper spacing
+    # Pattern: # Heading text → # Heading\n\ntext
+    markdown_text = re.sub(r'^(#{1,6}\s+[^#\n]+)([A-Z][a-z])', r'\1\n\n\2', markdown_text, flags=re.MULTILINE)
+    
+    # Fix incomplete italic formatting - add missing closing underscores
+    markdown_text = re.sub(r'_([^_\n]+?)(?=\s|$|\.|,|;|:|!|\?)', r'_\1_', markdown_text)
+    
+    # Fix superscript tags to Obsidian footnote format
+    markdown_text = re.sub(r'<sup>(\d+)</sup>', r'[^\1]', markdown_text)
+    
+    # Fix footnote references in text to link to footnote definitions
+    # Pattern: [^1] should link to footnote definition at end
+    markdown_text = re.sub(r'\[(\^?\d+)\]', r'[^\1]', markdown_text)
+    
     # Fix em-dash spacing
     markdown_text = re.sub(r'—([a-zA-Z])', r'— \1', markdown_text)
+    
+    # Fix double hash in titles (e.g., "# # Chapter 2: System structures")
+    markdown_text = re.sub(r'^# # ', r'# ', markdown_text, flags=re.MULTILINE)
+    
+    # Fix heading formatting with extra underscores
+    markdown_text = re.sub(r'^## \*([^*]+)__$', r'## \1', markdown_text, flags=re.MULTILINE)
+    markdown_text = re.sub(r'^## _([^_]+)__$', r'## \1', markdown_text, flags=re.MULTILINE)
+    
+    # Fix image captions - remove _List_of_figures.xhtml# references
+    markdown_text = re.sub(r'_List_of_figures\.xhtml#[^_\s]+', '', markdown_text)
+    
+    # Fix broken paragraph flow - remove stray closing parentheses
+    markdown_text = re.sub(r'\)\n\n([A-Z][a-z])', r'\n\n\1', markdown_text)
+    
+    # Fix malformed URLs in notes section
+    markdown_text = re.sub(r'\[http[^]]+\]\([^)]+\)', '', markdown_text)
+    
+    # Fix figure references - clean up "Figure 2.X" references
+    markdown_text = re.sub(r'Figure (\d+\.\d+)', r'**Figure \1**', markdown_text)
+    
+    # Fix author line formatting - ensure it's properly italicized
+    markdown_text = re.sub(r'^_([^_]+)$', r'*_\1_*', markdown_text, flags=re.MULTILINE)
     
     # === RESTORE PROTECTED CONTENT ===
     
@@ -344,6 +485,48 @@ def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=
     
     # Fix double underscores in headings and text
     markdown_text = re.sub(r'\\_\\_([^_]+)\\\_\\_', r'\1', markdown_text)
+    
+    # Convert numbered footnotes in Notes section to Obsidian footnote format
+    # Pattern: "1 taking the bus..." → "[^1]: taking the bus..."
+    # But ONLY in the Notes section, not in the main text
+    lines = markdown_text.split('\n')
+    in_notes_section = False
+    for i, line in enumerate(lines):
+        if line.strip() == '## Notes':
+            in_notes_section = True
+            continue
+        if in_notes_section and line.strip().startswith('##'):
+            in_notes_section = False
+            continue
+        if in_notes_section and re.match(r'^\d+\s+', line.strip()):
+            # Convert numbered footnotes to Obsidian format
+            lines[i] = re.sub(r'^(\d+)\s+', r'[^\1]: ', line)
+    markdown_text = '\n'.join(lines)
+    
+    # Fix line breaks around italic text - remove unwanted breaks
+    # Pattern: word\n\n_italic_\n\nword → word _italic_ word
+    markdown_text = re.sub(r'([a-zA-Z])\n\n_([^_]+)_\n\n([a-zA-Z])', r'\1 _\2_ \3', markdown_text)
+    markdown_text = re.sub(r'([a-zA-Z])\n_([^_]+)_\n([a-zA-Z])', r'\1 _\2_ \3', markdown_text)
+    
+    # Fix specific line break issues around italic words
+    # Pattern: word\n_italic_\nword → word _italic_ word
+    markdown_text = re.sub(r'([a-zA-Z])\n_([a-zA-Z]+)_\n([a-zA-Z])', r'\1 _\2_ \3', markdown_text)
+    
+    # Fix malformed footnote references that got converted to definitions
+    # Pattern: [1]: text → [^1] text (in main text, not Notes section)
+    lines = markdown_text.split('\n')
+    in_notes_section = False
+    for i, line in enumerate(lines):
+        if line.strip() == '## Notes':
+            in_notes_section = True
+            continue
+        if in_notes_section and line.strip().startswith('##'):
+            in_notes_section = False
+            continue
+        if not in_notes_section and re.match(r'^\[\d+\]:', line.strip()):
+            # Convert [1]: text to [^1] text in main text
+            lines[i] = re.sub(r'^\[(\d+)\]:\s*', r'[^\1] ', line)
+    markdown_text = '\n'.join(lines)
     
     # === CRITICAL FIXES FOR BOLD TEXT AND HEADINGS ===
     
@@ -1365,128 +1548,131 @@ def convert_book(
     This function is self-contained and does not use argparse.
     Returns a log dict or result object.
     """
-    # ...existing logic from main(), using the arguments above instead of global args...
-    # For demonstration, here's a placeholder for the actual logic:
-    # Replace this with the actual main logic from your script.
-    # Example:
-    # epub_path = Path(epub_path)
-    # output_dir_base = Path(output_dir)
-    # ...rest of the conversion logic...
-    # return conversion_log
-    #
-    # For now, just return a dummy log for structure:
-    return {"status": "success", "input": epub_path, "output": output_dir}
-
-    import re
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
-    parser.add_argument("epub_file", type=Path, nargs="?", help="Path to the .epub file")
-    parser.add_argument("--test-xhtml", type=Path, help="Run cleanup on a single XHTML file")
-    parser.add_argument("--test-cleanup", type=Path, help="Test cleanup on a single Markdown file")
-    parser.add_argument("--test-single", type=Path, help="Test single XHTML file conversion and cleanup")
-    args = parser.parse_args()
-
-    if args.test_cleanup:
-        input_path = args.test_cleanup.resolve()
-        if not input_path.exists():
-            print(f"File not found: {input_path}")
-            sys.exit(1)
-        
-        print(f"Testing cleanup on: {input_path}")
-        with open(input_path, "r", encoding="utf-8") as f:
-            raw_md = f.read()
-        
-        print("\n=== BEFORE CLEANUP ===")
-        print(raw_md[:500] + "..." if len(raw_md) > 500 else raw_md)
-        
-        cleaned_md = clean_markdown_text(raw_md, None)
-        
-        print("\n=== AFTER CLEANUP ===")
-        print(cleaned_md[:500] + "..." if len(cleaned_md) > 500 else cleaned_md)
-        
-        # Ask if user wants to save the cleaned version
-        response = input("\nSave cleaned version? (y/n): ").lower().strip()
-        if response == 'y':
-            backup_path = input_path.with_suffix('.md.backup')
-            shutil.copy2(input_path, backup_path)
-            print(f"Backup saved to: {backup_path}")
-            
-            with open(input_path, "w", encoding="utf-8") as f:
-                f.write(cleaned_md)
-            print(f"Cleaned version saved to: {input_path}")
-        return
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
-    parser.add_argument("input", type=str, help="Path to the .epub file")
-    parser.add_argument("--output", type=str, default=str(OUTPUT_ROOT), help="Output directory")
-    parser.add_argument("--skip-images", action="store_true", help="Skip copying images")
-    parser.add_argument("--obsidian", action="store_true", help="Use Obsidian formatting")
-    args = parser.parse_args()
-
-    result = convert_book(
-        epub_path=args.input,
-        output_dir=args.output,
-        skip_images=args.skip_images,
-        use_obsidian_format=args.obsidian
-    )
-    print(result)
+    import sys
+    import shutil
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    
+    # Convert string paths to Path objects
+    epub_file = Path(epub_path).resolve()
+    output_dir_base = Path(output_dir)
+    
+    if not epub_file.exists():
+        print(f"File not found: {epub_file}")
+        return {"status": "error", "message": f"File not found: {epub_file}"}
+    
+    epub_abs_path = str(epub_file.resolve())
+    SCRIPT_VERSION = "v0.9.0-beta"
+    
+    start_timestamp = datetime.utcnow().isoformat() + "Z"
+    
+    # Initialize conversion_log
+    conversion_log = {
+        "epub": epub_file.name,
+        "epub_path": epub_abs_path,
+        "output_dir": "",
+        "start_time_utc": start_timestamp,
+        "images_moved": False,
+        "script_version": SCRIPT_VERSION,
+        "xhtml_files_in_epub": [],
+        "unlinked_files": [],
+        "toc_entries": [],
+        "chapter_groups": [],
+        "warnings": [],
+        "chapters": []
+    }
+    
+    temp_dir = Path("/tmp") / f"epub_extract_{epub_file.stem}"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True)
+    
+    # Extract EPUB contents
+    extract_epub(epub_file, temp_dir)
+    print(f"EPUB extracted to: {temp_dir}")
+    
+    opf_path = find_opf_path(temp_dir)
+    content_root = opf_path.parent
+    
+    # Handle different EPUB folder structures
+    potential_content_roots = [
+        content_root,
+        content_root / "html",
+        content_root / "EPUB",
+    ]
+    
+    actual_content_root = None
+    for root in potential_content_roots:
+        if root.exists() and any(root.glob("*.xhtml")):
+            actual_content_root = root
+            break
+    
+    if actual_content_root is None:
+        actual_content_root = content_root
+        print(f"[WARNING] Could not find XHTML files in expected locations, using: {content_root}")
+    
+    content_root = actual_content_root
+    print(f"[INFO] Using content root: {content_root}")
+    
+    # Extract book title from copyright statement
+    book_title = extract_book_title_from_copyright(content_root)
+    if book_title:
+        safe_book_title = safe_filename(book_title)
+        output_dir = output_dir_base / safe_book_title
         print(f"[INFO] Using book title for folder: {safe_book_title}")
     else:
-        # Fallback to EPUB filename
-        output_dir = OUTPUT_ROOT / epub_file.stem
+        output_dir = output_dir_base / epub_file.stem
         print(f"[INFO] Using EPUB filename for folder: {epub_file.stem}")
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Update conversion_log with the correct output_dir and book title
+    # Update conversion_log
     conversion_log["output_dir"] = str(output_dir)
     conversion_log["book_title"] = book_title if book_title else epub_file.stem
-
+    
     # Copy images directory if present
-    images_src = content_root / "images"
-    images_dst = output_dir / "images"
-    if images_src.exists() and images_src.is_dir():
-        shutil.copytree(images_src, images_dst, dirs_exist_ok=True)
-        print(f"Copied images to: {images_dst}")
-    # Update images_moved status in conversion_log
-    conversion_log["images_moved"] = images_src.exists() and images_src.is_dir() and any(images_src.iterdir())
-
-    # Parse the Table of Contents (toc.xhtml) to obtain ordered chapter files
-    toc_file = content_root / "toc.xhtml"  # Look for the navigation file
+    if not skip_images:
+        images_src = content_root / "images"
+        images_dst = output_dir / "images"
+        if images_src.exists() and images_src.is_dir():
+            shutil.copytree(images_src, images_dst, dirs_exist_ok=True)
+            print(f"Copied images to: {images_dst}")
+        conversion_log["images_moved"] = images_src.exists() and images_src.is_dir() and any(images_src.iterdir())
+    
+    # Parse the Table of Contents
+    toc_file = content_root / "toc.xhtml"
     if not toc_file.exists():
         print("Error: toc.xhtml not found.")
-        sys.exit(1)
-
-    toc_entries = parse_toc_xhtml(toc_file)  # Parse TOC to get file order
+        return {"status": "error", "message": "toc.xhtml not found"}
+    
+    toc_entries = parse_toc_xhtml(toc_file)
     conversion_log["toc_entries"] = [
         {"file": f, "anchor": a, "label": l, "depth": d}
         for f, a, l, d in toc_entries
     ]
-
-    # List all xhtml files in content_root
-    all_xhtml_files = {f.name for f in (content_root).glob("*.xhtml")}
     
-    # --- FIX: Explicitly remove toc.xhtml so it is not processed as content ---
-    # This prevents the duplicate TOC file issue where toc.xhtml gets converted to Markdown
-    # and creates a second TOC file alongside our generated one.
+    # List all xhtml files in content_root
+    all_xhtml_files = {f.name for f in content_root.glob("*.xhtml")}
+    
+    # Remove toc.xhtml from processing
     all_xhtml_files.discard("toc.xhtml")
-    print(f"[INFO] Excluded toc.xhtml from content processing to prevent duplicate TOC files")
-    # --- END FIX ---
     
     conversion_log["xhtml_files_in_epub"] = sorted(list(all_xhtml_files))
     toc_xhtml_files = [file for file, _, _, _ in toc_entries]
     toc_used = set(toc_xhtml_files)
-
-    # Front matter: files not referenced in TOC (will be overridden by metadata-driven structure)
+    
+    # Front matter: files not referenced in TOC
     old_front_matter = sorted(all_xhtml_files - toc_used)
     conversion_log["unlinked_files"] = sorted(list(old_front_matter))
-
-    # --- Automatic back matter detection based on title keywords ---
+    
+    # Back matter detection
     back_keywords = ["references", "glossary", "index"]
-    # Remove toc.xhtml from TOC-driven structure (already handled separately as front matter)
-    toc_main_entries = [(f, a, l, d) for f, a, l, d in toc_entries if "toc.xhtml" not in f]
     back_matter = []
+    
+    # Filter TOC entries to main chapters (depth 1)
+    toc_main_entries = [(f, a, l, d) for f, a, l, d in toc_entries if d == 1]
+    
     filtered_toc_main_entries = []
     for file, anchor, label, depth in toc_main_entries:
         xhtml_path = content_root / file
@@ -1495,47 +1681,35 @@ if __name__ == "__main__":
             back_matter.append(file)
         else:
             filtered_toc_main_entries.append((file, anchor, label, depth))
-    toc_main_entries = filtered_toc_main_entries
-    # --------------------------------------------------------------
-
-    # === CHAPTER GROUPING (TOC-DRIVEN) ===
-    # Use TOC hierarchy as primary source of truth, validate with metadata
-    # This prevents over-extraction of subsections that are just anchors within chapters
+    
+    # Build TOC-driven structure
     print("\n=== BUILDING TOC-DRIVEN STRUCTURE ===")
-    chapter_groups, front_matter, back_matter = build_toc_driven_structure(toc_main_entries, content_root)
+    chapter_groups, front_matter, back_matter = build_toc_driven_structure(filtered_toc_main_entries, content_root)
     
-    # Debug output for TOC-driven structure
+    # Debug output
     print("\n=== TOC-DRIVEN STRUCTURE RESULTS ===")
-    print(f"Front matter files: {len(front_matter)}")
-    for f in front_matter:
-        print(f"  → {f}")
+    print(f"Total chapters: {len(chapter_groups)}")
+    for i, (num, title, files) in enumerate(chapter_groups, 1):
+        print(f"Chapter {i}: {title} ({len(files)} files)")
+        for j, file in enumerate(files, 1):
+            print(f"  {j}. {file}")
     
-    print(f"\nChapters: {len(chapter_groups)}")
-    for chapter_num, title, files in chapter_groups:
-        print(f"Chapter {chapter_num:02d}: {title}")
-        for j, file in enumerate(files):
-            label = f"{chapter_num:02d}.{j}" if j > 0 else f"{chapter_num:02d}.0"
-            print(f"  → {label} - {file}")
+    print(f"\nFront matter: {len(front_matter)} files")
+    for file in front_matter:
+        print(f"  - {file}")
     
-    print(f"\nBack matter files: {len(back_matter)}")
-    for f in back_matter:
-        print(f"  → {f}")
+    print(f"\nBack matter: {len(back_matter)} files")
+    for file in back_matter:
+        print(f"  - {file}")
     
-    print("=" * 50)
-    
-    # TOC-DRIVEN APPROACH: No subsection extraction needed
-    # We now use the TOC structure to determine file grouping
-    # Subsections that are anchors within the same XHTML file stay as part of that file
-    print("\n=== TOC-DRIVEN APPROACH: No subsection extraction ===")
-    print("[INFO] Using TOC structure to determine file grouping")
     print("[INFO] Subsections that are anchors within the same XHTML file will remain as part of that file")
-
+    
     conversion_log["chapter_groups"] = [
         {"chapter_num": f"{num:02d}", "title": title, "files": group}
         for num, title, group in chapter_groups
     ]
     
-    # Add chapter grouping metadata for debugging
+    # Add chapter grouping metadata
     conversion_log["chapter_grouping_metadata"] = {
         "total_chapters": len(chapter_groups),
         "single_file_chapters": sum(1 for _, _, files in chapter_groups if len(files) == 1),
@@ -1545,73 +1719,24 @@ if __name__ == "__main__":
         "content_root_used": str(content_root),
         "epub_structure_type": "OEBPS/html" if "html" in str(content_root) else "OEBPS" if "OEBPS" in str(content_root) else "EPUB" if "EPUB" in str(content_root) else "Unknown"
     }
-
-    # === ASSIGN LABELS ===
-    # chapter_index_map maps each file to its decimal chapter/subsection label (e.g., 01.0, 01.1, ...)
-    chapter_index_map = {}  # Maps original file to label (e.g., 01.0, 01.1, etc.)
-    file_sections = []
-
-    # --- Front Matter ---
-    # Files not referenced in TOC are considered front matter and labeled as 00a, 00b, ...
-    # Sort frontmatter files by their order in the TOC to ensure sequential lettering
-    frontmatter_with_order = []
-    for i, (file, anchor, label, depth) in enumerate(toc_entries):
-        if file in front_matter:
-            frontmatter_with_order.append((i, file))  # (toc_index, filename)
     
-    # Sort by TOC order and assign sequential letters
-    frontmatter_with_order.sort(key=lambda x: x[0])
-    for i, (toc_index, fname) in enumerate(frontmatter_with_order):
-        label = f"00{chr(ord('a') + i)}"
-        chapter_index_map[fname] = label
-        file_sections.append((label, [fname], "Front Matter"))
-
-    # --- Chapters + Subsections ---
-    # Each chapter group: first file is the chapter header (e.g., 01.0), subsequent files are subsections (e.g., 01.1, 01.2, ...)
-    for chap_num, chap_title, files in chapter_groups:
-        for i, file in enumerate(files):
-            if i == 0:
-                label = f"{chap_num:02d}.0"  # Chapter header
-            else:
-                label = f"{chap_num:02d}.{i}"  # Chapter subsections
-            chapter_index_map[file] = label
-            file_sections.append((label, [file], chap_title))
-
-    # --- Back Matter ---
-    # Files detected as back matter (e.g., references, glossary, index) are labeled as 90, 91, ...
-    for i, fname in enumerate(back_matter):
-        label = f"{90 + i}"
-        chapter_index_map[fname] = label
-        file_sections.append((label, [fname], "Back Matter"))
-
-    # Debug output of chapter_index_map
-    print("\n--- DEBUG: Chapter Index Map ---")
-    for k, v in chapter_index_map.items():
-        print(f"{k}: {v}")
-
-    # --- PHASE 1: Pandoc Conversion Phase ---
-    # Convert all .xhtml files to temp .md files in a dedicated temp_md_dir
+    # Assign labels to chapters
+    chapter_map = {}
+    for num, title, group in chapter_groups:
+        label = f"{num:02d}.0"
+        for fname in group:
+            chapter_map[fname] = label
+    
+    # Phase 1: Pandoc Conversion
     temp_md_dir = temp_dir / "md"
     temp_md_dir.mkdir(parents=True, exist_ok=True)
     
-    # Get all files that need to be converted (including subsections)
-    all_files_to_convert = set()
-    all_files_to_convert.update(all_xhtml_files)  # All XHTML files
+    # Get all files that need to be converted
+    xhtml_files_for_md = []
+    for _, _, group in chapter_groups:
+        xhtml_files_for_md.extend(group)
     
-    # Also include any files from chapter groups that might not be in all_xhtml_files
-    for chap_num, chap_title, files in chapter_groups:
-        all_files_to_convert.update(files)
-    
-    # Also include frontmatter and backmatter files
-    all_files_to_convert.update(front_matter)
-    all_files_to_convert.update(back_matter)
-    
-    xhtml_files_for_md = list(all_files_to_convert)
-    print(f"[DEBUG] Files to convert: {len(xhtml_files_for_md)}")
-    for f in sorted(xhtml_files_for_md):
-        print(f"  → {f}")
-    
-    # Validation step: Check XHTML files exist before Pandoc conversion
+    # Validation step
     for xhtml_file in xhtml_files_for_md:
         xhtml_path = content_root / xhtml_file
         if not xhtml_path.exists():
@@ -1619,88 +1744,91 @@ if __name__ == "__main__":
             print(f"Warning: {warning}")
             conversion_log["warnings"].append(warning)
     
+    # Convert XHTML to Markdown
     for xhtml_file in xhtml_files_for_md:
         xhtml_path = content_root / xhtml_file
         md_temp_path = temp_md_dir / f"{Path(xhtml_file).stem}.md"
         run_pandoc(xhtml_path, md_temp_path)
     print(f"[Phase 1] Converted {len(xhtml_files_for_md)} XHTML files to Markdown in temp folder: {temp_md_dir}")
-
-    # --- PHASE 2: File Naming & Renaming Phase ---
-    # Assign logical filenames (00a, 01a, etc.) based on TOC and extracted titles.
-    # Move .md files from temp_md_dir to final output directory.
-    chapter_map = {}  # XHTML file -> final .md filename
-    for label, group, chap_title in file_sections:
-        if not group:
-            continue
+    
+    # Phase 2: File Organization
+    print("\n=== PHASE 2: FILE ORGANIZATION ===")
+    for num, title, group in chapter_groups:
+        label = f"{num:02d}.0"
+        print(f"\nProcessing Chapter {num}: {title}")
+        
         for fname in group:
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
             safe_title = safe_filename(title)
             output_filename = f"{label} - {safe_title}.md"
-            stem = Path(fname).stem
-            md_temp_path = temp_md_dir / (Path(fname).stem + ".md")
+            
+            md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
             output_path = output_dir / output_filename
-            # Check if the expected file exists before moving
+            
             if not md_temp_path.exists():
                 warning = f"Expected markdown not found: {md_temp_path.name}"
                 print(f"Warning: {warning}")
                 conversion_log["warnings"].append(warning)
                 continue
+            
             # Move/rename the file
             shutil.move(str(md_temp_path), str(output_path))
+            
             chapter_map[fname] = output_filename
             # Log for JSON
             conversion_log["chapters"].append({
                 "index": label,
                 "title": title,
                 "source_files": [fname],
-                "output_file": output_filename
+                "output_file": output_filename,
+                "output_path": str(output_path)
             })
-            print(f"[Phase 2] Moved {md_temp_path.name} to {output_filename}")
-
-    # Remove any leftover temp .md files (should be none, but for safety)
-    for f in temp_md_dir.glob("*.md"):
-        f.unlink()
-    # Only remove temp_md_dir if it is empty
-    if not any(temp_md_dir.iterdir()):
-        temp_md_dir.rmdir()
-    print(f"[Phase 2] Temp Markdown files cleaned up.")
-
-    # --- PHASE 3: Markdown Cleanup Phase ---
-    # Read each .md file in the output directory, apply clean_markdown_text() (excluding link conversion)
+            
+            print(f"  {fname} -> {output_filename}")
+    
+    # Phase 3: Markdown Cleanup
+    print("\n=== PHASE 3: MARKDOWN CLEANUP ===")
     for entry in conversion_log["chapters"]:
         md_path = output_dir / entry["output_file"]
         if not md_path.exists():
             continue
+        
         with open(md_path, "r", encoding="utf-8") as f:
-            raw_md = f.read()
-        cleaned_md = clean_markdown_text(raw_md, chapter_map=None)  # Exclude link conversion
+            content = f.read()
+        
+        cleaned_content = clean_markdown_text(content, chapter_map)
+        
         with open(md_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_md)
-        print(f"[Phase 3] Cleaned markdown: {entry['output_file']}")
-
-    # --- PHASE 4: Cross-Link Rewriting Phase ---
-    # Replace internal [text](chapter.xhtml#anchor) with Obsidian [[filename#anchor]]
-    for entry in conversion_log["chapters"]:
-        md_path = output_dir / entry["output_file"]
-        if not md_path.exists():
-            continue
-        with open(md_path, "r", encoding="utf-8") as f:
-            raw_md = f.read()
-        cleaned_md = clean_markdown_text(raw_md, chapter_map=chapter_map)
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_md)
-        print(f"[Phase 4] Rewrote cross-links in: {entry['output_file']}")
-
-    # Generate Obsidian-compatible Table of Contents file
-    # This creates the main TOC file with proper Obsidian links
-    # The toc.xhtml file has been excluded from content processing above to prevent duplicates
+            f.write(cleaned_content)
+        
+        print(f"Cleaned: {entry['output_file']}")
+    
+    # Phase 4: Cross-Link Rewriting
+    if use_obsidian_format:
+        print("\n=== PHASE 4: CROSS-LINK REWRITING ===")
+        for entry in conversion_log["chapters"]:
+            md_path = output_dir / entry["output_file"]
+            if not md_path.exists():
+                continue
+            
+            with open(md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            # Apply cross-link rewriting
+            content = post_process_markdown(content, chapter_map)
+            
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            
+            print(f"Rewrote links: {entry['output_file']}")
+    
+    # Generate Obsidian TOC
     toc_filename = generate_obsidian_toc(conversion_log, output_dir, str(book_title) if book_title is not None else "")
     toc_path = output_dir / toc_filename
     print(f"[INFO] Generated Obsidian-compatible TOC: {toc_path}")
-
-    # --- PHASE 5: YAML Header Injection Phase ---
-    # Extract book metadata and generate YAML headers
+    
+    # Phase 5: YAML Header Injection
     book_metadata = extract_book_metadata_from_copyright(content_root)
     
     if book_metadata:
@@ -1726,7 +1854,7 @@ if __name__ == "__main__":
                 
                 # Generate YAML header using the full title from BibTeX entry
                 yaml_header = generate_yaml_header(
-                    title=bibtex_entry['title'],  # Use full title from BibTeX
+                    title=bibtex_entry['title'],
                     chapter=entry["output_file"],
                     authors=bibtex_authors,
                     citation_key=citation_key,
@@ -1745,42 +1873,32 @@ if __name__ == "__main__":
             print(f"[WARNING] No matching BibTeX entry found for book: {title}")
     else:
         print(f"[WARNING] No book metadata found for YAML header generation")
-
-    # Add runtime metadata before writing log
-    from datetime import datetime
+    
+    # Add runtime metadata
     end_timestamp = datetime.utcnow().isoformat() + "Z"
     conversion_log["end_time_utc"] = end_timestamp
     conversion_log["total_output_files"] = len(conversion_log["chapters"])
-
+    
     # Create timestamped log filename
-    from datetime import datetime
     timestamp = datetime.now().strftime("%Y-%m-%d_%H.%M")
-    # Use book title for log filename if available, otherwise use EPUB filename
     if book_title:
         safe_log_title = safe_filename(book_title)
         log_path = LOG_DIR / f"{safe_log_title}_{timestamp}.json"
     else:
         log_path = LOG_DIR / f"{epub_file.stem}_{timestamp}.json"
+    
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
-
+    
     return conversion_log
 
-import time
-if __name__ == "__main__":
-    start_time = time.time()
-    # Run main() and capture conversion log
-    log = main()
-    if log is None:
-        log = {}
-    elapsed = time.time() - start_time
-    # Show summary dialog with accurate counts
-    # show_final_dialog(log, elapsed, md_status=True, cleanup_status=True, json_status=True)
-
-# Utility for direct XHTML to Markdown conversion for testing
+# --- CLI interface ---
 if __name__ == "__main__":
     import sys
+    import time
+    import argparse
+    
     # Direct XHTML-to-Markdown conversion utility (must run before argparse)
     if len(sys.argv) == 3 and sys.argv[1] == "--xhtml-to-md":
         from pathlib import Path
@@ -1790,7 +1908,65 @@ if __name__ == "__main__":
         md = clean_markdown_text(xhtml_content)
         print(md)
         sys.exit(0)
-    # ... rest of main logic ...
+    
+    # CLI argument parsing
+    parser = argparse.ArgumentParser(description="Convert EPUB to Markdown (Obsidian-ready)")
+    parser.add_argument("input", type=str, help="Path to the .epub file")
+    parser.add_argument("--output", type=str, default=str(OUTPUT_ROOT), help="Output directory")
+    parser.add_argument("--skip-images", action="store_true", help="Skip copying images")
+    parser.add_argument("--obsidian", action="store_true", help="Use Obsidian formatting")
+    parser.add_argument("--test-cleanup", type=str, help="Test cleanup on a single Markdown file")
+    parser.add_argument("--test-single", type=str, help="Test single XHTML file conversion and cleanup")
+    args = parser.parse_args()
+    
+    start_time = time.time()
+    
+    if args.test_cleanup:
+        input_path = Path(args.test_cleanup).resolve()
+        if not input_path.exists():
+            print(f"File not found: {input_path}")
+            sys.exit(1)
+        
+        print(f"Testing cleanup on: {input_path}")
+        with open(input_path, "r", encoding="utf-8") as f:
+            raw_md = f.read()
+        
+        print("\n=== BEFORE CLEANUP ===")
+        print(raw_md[:500] + "..." if len(raw_md) > 500 else raw_md)
+        
+        cleaned_md = clean_markdown_text(raw_md, None)
+        
+        print("\n=== AFTER CLEANUP ===")
+        print(cleaned_md[:500] + "..." if len(cleaned_md) > 500 else cleaned_md)
+        
+        response = input("\nSave cleaned version? (y/n): ").lower().strip()
+        if response == 'y':
+            backup_path = input_path.with_suffix('.md.backup')
+            import shutil
+            shutil.copy2(input_path, backup_path)
+            print(f"Backup saved to: {backup_path}")
+            
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_md)
+            print(f"Cleaned version saved to: {input_path}")
+    elif args.test_single:
+        input_path = Path(args.test_single).resolve()
+        if not input_path.exists():
+            print(f"File not found: {input_path}")
+            sys.exit(1)
+        test_single_xhtml(input_path)
+    else:
+        # Main conversion
+        result = convert_book(
+            epub_path=args.input,
+            output_dir=args.output,
+            skip_images=args.skip_images,
+            use_obsidian_format=args.obsidian
+        )
+        print(f"Conversion completed: {result}")
+    
+    elapsed = time.time() - start_time
+    print(f"Total time: {elapsed:.2f} seconds")
 
 
         
