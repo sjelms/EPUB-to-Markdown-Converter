@@ -610,7 +610,7 @@ def extract_book_title_from_copyright(content_root: Path) -> str | None:
     return metadata.get('title') if metadata else None
 
 def find_bibtex_entry_by_title_and_authors(title: str, authors: str, bibtex_path: Path = Path("epub.bib")) -> dict | None:
-    """Find BibTeX entry by matching title and authors."""
+    """Find BibTeX entry by matching title and authors with robust parsing."""
     if not bibtex_path.exists():
         print(f"[WARNING] BibTeX file not found: {bibtex_path}")
         return None
@@ -640,28 +640,54 @@ def find_bibtex_entry_by_title_and_authors(title: str, authors: str, bibtex_path
             
             citation_key = key_match.group(1).strip()
             
-            # Look for title and author/editor fields
+            # Look for title and author/editor fields with better parsing
             entry_title = None
             entry_authors = None
+            entry_editor = None
+            entry_year = None
+            entry_publisher = None
             
             for line in lines:
                 line = line.strip()
                 
+                # Extract title with better regex
                 if 'title' in line and '=' in line:
-                    # Extract title value - handle both single and double quotes
                     title_match = re.search(r'title\s*=\s*["\']([^"\']+)["\']', line)
                     if title_match:
-                        entry_title = title_match.group(1)
+                        entry_title = clean_bibtex_text(title_match.group(1))
                 
-                elif ('author' in line or 'editor' in line) and '=' in line:
-                    # Extract author/editor value - handle both single and double quotes
-                    author_match = re.search(r'(author|editor)\s*=\s*["\']([^"\']+)["\']', line)
+                # Extract author with fallback to editor
+                elif 'author' in line and '=' in line:
+                    author_match = re.search(r'author\s*=\s*["\']([^"\']+)["\']', line)
                     if author_match:
-                        entry_authors = author_match.group(2)
+                        entry_authors = clean_bibtex_text(author_match.group(1))
+                
+                # Extract editor as fallback
+                elif 'editor' in line and '=' in line:
+                    editor_match = re.search(r'editor\s*=\s*["\']([^"\']+)["\']', line)
+                    if editor_match:
+                        entry_editor = clean_bibtex_text(editor_match.group(1))
+                
+                # Extract year for additional matching
+                elif 'year' in line and '=' in line:
+                    year_match = re.search(r'year\s*=\s*["\']?(\d{4})["\']?', line)
+                    if year_match:
+                        entry_year = year_match.group(1)
+                
+                # Extract publisher for additional context
+                elif 'publisher' in line and '=' in line:
+                    publisher_match = re.search(r'publisher\s*=\s*["\']([^"\']+)["\']', line)
+                    if publisher_match:
+                        entry_publisher = clean_bibtex_text(publisher_match.group(1))
+            
+            # Use editor as fallback if no author found
+            if not entry_authors and entry_editor:
+                entry_authors = entry_editor
+                print(f"[INFO] Using editor as author for entry: {citation_key}")
             
             # Try to match title and authors
             if entry_title and entry_authors:
-                # Simple fuzzy matching - check if key words match
+                # Enhanced fuzzy matching
                 title_words = set(re.findall(r'\b\w+\b', title.lower()))
                 entry_title_words = set(re.findall(r'\b\w+\b', entry_title.lower()))
                 
@@ -671,11 +697,15 @@ def find_bibtex_entry_by_title_and_authors(title: str, authors: str, bibtex_path
                 # Also check if the search title is contained in the entry title
                 title_contained = title.lower() in entry_title.lower()
                 
-                if title_overlap > 0.5 or title_contained:  # 50% overlap threshold or title contained
+                # Additional check: if titles are very similar (high overlap)
+                if title_overlap > 0.5 or title_contained:
                     return {
                         'citation_key': citation_key,
                         'title': entry_title,
-                        'authors': entry_authors
+                        'authors': entry_authors,
+                        'year': entry_year,
+                        'publisher': entry_publisher,
+                        'was_editor': entry_authors == entry_editor
                     }
         
         print(f"[WARNING] No matching BibTeX entry found for title: {title}")
@@ -685,16 +715,59 @@ def find_bibtex_entry_by_title_and_authors(title: str, authors: str, bibtex_path
         print(f"[ERROR] Error parsing BibTeX file: {e}")
         return None
 
+def clean_bibtex_text(text: str) -> str:
+    """Clean BibTeX text by removing braces and normalizing formatting."""
+    if not text:
+        return ""
+    
+    text = text.strip()
+    text = text.replace("\n", " ")  # Ensure multiline text is on a single line
+    text = re.sub(r"\{(.*?)\}", r"\1", text)  # Remove braces `{}` while preserving content
+    text = text.replace("&", "and")  # Replace ampersands with "and"
+    return text.strip()
+
 def parse_bibtex_authors(author_string: str) -> list:
-    """Parse BibTeX author string into list of formatted author names."""
+    """Parse BibTeX author string into list of formatted author names with robust handling."""
     if not author_string:
         return []
     
-    # Remove common prefixes
-    author_string = re.sub(r'^by\s+', '', author_string, flags=re.IGNORECASE)
+    # Clean the author string first
+    author_string = clean_bibtex_text(author_string)
+    
+    # Remove common prefixes (but be more careful about "By" at the start)
+    if author_string.lower().startswith('by '):
+        author_string = author_string[3:].strip()
+    
+    # Identify institutions inside `{}` and preserve them
+    protected_authors = re.findall(r"\{.*?\}", author_string)  # Find `{}` enclosed text
+    temp_replacement = "INSTITUTION_PLACEHOLDER"
+    temp_authors = re.sub(r"\{.*?\}", temp_replacement, author_string)  # Temporarily replace institutions
     
     # Split by " and " to separate individual authors
-    authors = re.split(r'\s+and\s+', author_string)
+    authors = re.split(r'\s+and\s+', temp_authors)
+    
+    # If we only got one author but it contains a comma, it might be two authors
+    if len(authors) == 1 and ',' in authors[0]:
+        # Check if this looks like "Last, First" format (single person) vs "Name1, Name2" (two people)
+        author = authors[0]
+        if not author.startswith('{') and author.count(',') == 1:
+            # This might be "Last, First" format - leave it as is
+            pass
+        else:
+            # This might be multiple authors separated by commas
+            # Split by comma and clean up
+            potential_authors = [a.strip() for a in author.split(',')]
+            # Only use this if the parts look like individual names
+            if all(len(part.split()) >= 2 for part in potential_authors):
+                authors = potential_authors
+    
+    # Clean up any trailing commas from the split
+    authors = [author.rstrip(',').strip() for author in authors]
+    
+    # Restore institution names in their correct positions
+    for i, author in enumerate(authors):
+        if temp_replacement in author:
+            authors[i] = protected_authors.pop(0)
     
     formatted_authors = []
     for author in authors:
@@ -702,16 +775,28 @@ def parse_bibtex_authors(author_string: str) -> list:
         if not author:
             continue
         
-        # Handle "Last, First" format
-        if ',' in author and not re.search(r'\b(and|&)\b', author):
+        # Clean the author name
+        author = clean_bibtex_text(author)
+        
+        # Handle "Last, First" format for personal names (not institutions)
+        # Only apply this if it looks like a single person's name in "Last, First" format
+        if ',' in author and not author.startswith("{"):
             parts = author.split(',', 1)
             if len(parts) == 2:
                 last_name = parts[0].strip()
                 first_name = parts[1].strip()
-                formatted_author = f"{first_name} {last_name}"
+                # Only apply "Last, First" -> "First Last" if both parts look like name components
+                # (i.e., not if one part looks like a full name)
+                if (len(last_name.split()) <= 3 and len(first_name.split()) <= 3 and 
+                    not (len(last_name.split()) >= 2 and len(first_name.split()) >= 2)):
+                    formatted_author = f"{first_name} {last_name}"
+                else:
+                    # This might be two separate names, not "Last, First" format
+                    formatted_author = author
             else:
                 formatted_author = author
         else:
+            # For names without commas, assume they're already in "First Last" format
             formatted_author = author
         
         formatted_authors.append(formatted_author)
