@@ -1,3 +1,122 @@
+def generate_markdown_outputs(chapter_map: list[dict], output_dir_path: Path, bibtex_data: dict = None):
+    """Generate Markdown files from the structured chapter map."""
+    from bs4 import BeautifulSoup
+    from markdownify import markdownify as md
+
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    for entry in chapter_map:
+        filepath = entry["filepath"]
+        label = entry["label"]
+        title = entry.get("title", entry["filename"].replace(".xhtml", ""))
+        output_filename = f"{label} - {title}.md"
+        output_path = output_dir_path / safe_filename(output_filename)
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                soup = BeautifulSoup(f, "lxml")
+        except Exception as e:
+            print(f"[ERROR] Failed to parse {filepath.name}: {e}")
+            continue
+
+        # Extract clean title if possible
+        heading = soup.find(["h1", "title"])
+        if heading and heading.get_text(strip=True):
+            title = heading.get_text(strip=True)
+
+        # Convert to Markdown
+        markdown_text = md(
+            str(soup),
+            heading_style="ATX",
+            em_symbol="*",
+            strong_symbol="**",
+            bullets="-",
+            code_symbol="`",
+            strip=["script", "style"]
+        )
+
+        # YAML header
+        yaml_header = f"---\ntitle: {title}\nlabel: {label}\nfilename: {entry['filename']}\n---\n\n"
+
+        with open(output_path, "w", encoding="utf-8") as out_md:
+            out_md.write(yaml_header + markdown_text)
+def assign_manifest_structure(manifest_map: list[dict]) -> list[dict]:
+    """Assigns structured output labels (e.g., 00a, 01.0, 900) to each manifest item."""
+    front_counter = 0
+    chapter_counter = 1
+    back_counter = 900
+    chapter_map = []
+
+    for item in manifest_map:
+        classification = item.get("classified_as", "chapter")
+
+        if classification == "frontmatter":
+            label = f"00{chr(97 + front_counter)}"  # 00a, 00b, 00c
+            front_counter += 1
+
+        elif classification == "chapter":
+            label = f"{chapter_counter:02}.0"
+            chapter_counter += 1
+
+        elif classification == "backmatter":
+            label = f"{back_counter}"
+            back_counter += 1
+
+        else:
+            label = f"999"  # fallback
+
+        item["label"] = label
+        chapter_map.append(item)
+
+    return chapter_map
+def build_manifest_map(opf_path: Path, content_root: Path) -> list[dict]:
+    """Creates a manifest map based on spine and manifest structure."""
+    from bs4 import BeautifulSoup
+
+    manifest_map = []
+
+    # Parse the OPF
+    with open(opf_path, "r", encoding="utf-8") as f:
+        opf_soup = BeautifulSoup(f, "lxml")
+
+    manifest = {item["id"]: item for item in opf_soup.find_all("item") if item.has_attr("id")}
+    spine = opf_soup.find("spine")
+    spine_items = spine.find_all("itemref") if spine else []
+
+    for index, itemref in enumerate(spine_items):
+        idref = itemref.get("idref")
+        manifest_item = manifest.get(idref)
+        if not manifest_item:
+            continue
+
+        href = manifest_item.get("href")
+        media_type = manifest_item.get("media-type")
+        properties = manifest_item.get("properties", "")
+        epub_type = itemref.get("epub:type", "")
+
+        # Construct absolute path to the content file
+        file_path = (content_root / href).resolve()
+        rel_path = Path(href).name
+
+        # Basic classification placeholder (refined later)
+        classification = "chapter"
+        if any(kw in rel_path.lower() for kw in ("cover", "title", "copyright", "acknowledgements", "intro")):
+            classification = "frontmatter"
+        elif any(kw in rel_path.lower() for kw in ("index", "references", "appendix", "conclusion", "notes", "ref", "back")):
+            classification = "backmatter"
+
+        manifest_map.append({
+            "spine_index": index,
+            "id": idref,
+            "filename": rel_path,
+            "filepath": file_path,
+            "media_type": media_type,
+            "properties": properties,
+            "epub_type": epub_type,
+            "classified_as": classification
+        })
+
+    return manifest_map
 import subprocess
 
 # Helper function to show a macOS dialog (restored for completion notification)
