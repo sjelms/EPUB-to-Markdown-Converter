@@ -175,13 +175,16 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
         if isinstance(text, str) and '_List_of_figures.xhtml#' in text:
             # Replace with clean figure reference
             clean_text = re.sub(r'_List_of_figures\.xhtml#[^_\s]+', '', text)
-            text.replace_with(clean_text)
+            # Create a new NavigableString for the replacement
+            from bs4.element import NavigableString
+            new_text = NavigableString(clean_text)
+            text.replace_with(new_text)
     
     # Fix broken links in text
     for a_tag in soup.find_all('a'):
         if isinstance(a_tag, Tag):
             href = a_tag.get('href', '')
-            if 'contents.xhtml' in href:
+            if href and isinstance(href, str) and 'contents.xhtml' in href:
                 # Remove problematic internal links
                 a_tag.unwrap()
     
@@ -1310,124 +1313,76 @@ def validate_chapter_groups(chapter_groups, max_expected_chapters=20):
     
     return True
 
-def build_toc_driven_structure(toc_entries, content_root: Path) -> tuple:
+def build_spine_driven_structure(opf_soup, content_root: Path) -> tuple:
     """
-    Build chapter structure based on TOC hierarchy first, then validate with metadata.
-    This prevents over-extraction of subsections that are just anchors within chapters.
-    
-    NEW APPROACH: Use TOC as primary source of truth, only create separate files when
-    TOC indicates different XHTML files, not just different anchors within the same file.
+    NEW FUNCTION: Build chapter structure based on the spine in content.opf.
+    This method uses the spine (reading order) and heading structure from XHTML files
+    instead of relying on a nav.xhtml or toc.xhtml which may not be present.
     """
-    print("\n=== BUILDING TOC-DRIVEN STRUCTURE ===")
-    
-    # Extract metadata for all files for validation
-    file_metadata = {}
-    for file, _, _, _ in toc_entries:
-        xhtml_path = content_root / file
-        if xhtml_path.exists():
-            file_metadata[file] = extract_xhtml_metadata(xhtml_path)
-        else:
-            print(f"[WARNING] XHTML file not found: {xhtml_path}")
-    
-    # Also check all XHTML files in content_root
-    all_xhtml_files = list(content_root.glob("*.xhtml"))
-    for xhtml_file in all_xhtml_files:
-        if xhtml_file.name not in file_metadata:
-            file_metadata[xhtml_file.name] = extract_xhtml_metadata(xhtml_file)
-    
-    # TOC-DRIVEN GROUPING LOGIC
+    print("\n=== BUILDING SPINE-DRIVEN STRUCTURE ===")
+
+    # Parse manifest and spine
+    manifest = {item["id"]: item for item in [
+        {"id": item.get("id"), "href": item.get("href"), "media-type": item.get("media-type")}
+        for item in opf_soup.find_all("item")
+    ]}
+    spine_ids = [item.get("idref") for item in opf_soup.find_all("itemref") if item.get("idref")]
+
+    # Resolve hrefs for spine items
+    spine_files = [manifest[item_id]["href"] for item_id in spine_ids if item_id in manifest]
+
+    # Extract metadata for each spine file
     chapter_groups = []
     frontmatter_files = []
     backmatter_files = []
-    
-    current_chapter = None
+
+    chapter_index = 1
     current_chapter_files = []
-    current_chapter_title = ""
-    
-    # First pass: identify chapter boundaries more carefully
-    chapter_boundaries = []
-    for i, (file, anchor, label, depth) in enumerate(toc_entries):
-        if file == "toc.xhtml":
+    current_chapter_title = None
+
+    for file in spine_files:
+        xhtml_path = content_root / file
+        if not xhtml_path.exists():
+            print(f"[WARNING] Missing file in spine: {file}")
             continue
-            
-        metadata = file_metadata.get(file, {})
-        title = metadata.get('title', label)
-        
-        # Only start a new chapter if it's explicitly a "CHAPTER" entry
-        if depth == 1 and "CHAPTER" in title.upper():
-            chapter_boundaries.append(i)
-    
-    # Second pass: group files based on chapter boundaries
-    for i, (file, anchor, label, depth) in enumerate(toc_entries):
-        if file == "toc.xhtml":
-            continue
-            
-        metadata = file_metadata.get(file, {})
-        title = metadata.get('title', label)
-        
-        # Check if this is a chapter boundary
-        if i in chapter_boundaries:
-            # Save previous chapter if exists
-            if current_chapter is not None and current_chapter_files:
-                chapter_groups.append((current_chapter, current_chapter_title, current_chapter_files))
-            
-            # Start new chapter
-            current_chapter = len(chapter_groups) + 1
+
+        metadata = extract_xhtml_metadata(xhtml_path)
+        title = metadata.get("title") or file
+
+        # Determine section type
+        if metadata.get("is_frontmatter"):
+            frontmatter_files.append(file)
+        elif metadata.get("is_backmatter"):
+            if current_chapter_files:
+                chapter_groups.append((chapter_index, current_chapter_title or "Untitled", current_chapter_files))
+                chapter_index += 1
+                current_chapter_files = []
+            backmatter_files.append(file)
+        elif metadata.get("is_chapter"):
+            if current_chapter_files:
+                chapter_groups.append((chapter_index, current_chapter_title or "Untitled", current_chapter_files))
+                chapter_index += 1
             current_chapter_files = [file]
             current_chapter_title = title
-            continue
-        
-        # Check if this is back matter
-        if any(keyword in title.lower() for keyword in ["references", "glossary", "index", "conclusion", "discussion"]):
-            # Save current chapter if exists
-            if current_chapter is not None and current_chapter_files:
-                chapter_groups.append((current_chapter, current_chapter_title, current_chapter_files))
-            
-            # Add to back matter
-            backmatter_files.append(file)
-            current_chapter = None
-            current_chapter_files = []
-            continue
-        
-        # Check if this is front matter (before any chapter starts)
-        if current_chapter is None:
-            frontmatter_files.append(file)
-            continue
-        
-        # If we're in a chapter, add this file to the current chapter
-        if current_chapter is not None:
-            # Only add if it's a different XHTML file (not just a different anchor)
-            if file not in current_chapter_files:
-                current_chapter_files.append(file)
-    
-    # Save the last chapter
-    if current_chapter is not None and current_chapter_files:
-        chapter_groups.append((current_chapter, current_chapter_title, current_chapter_files))
-    
-    # Debug output
-    print(f"\n=== TOC-DRIVEN STRUCTURE RESULTS ===")
-    print(f"Front matter files: {len(frontmatter_files)}")
-    for f in frontmatter_files:
-        print(f"  → {f}")
-    
-    print(f"\nChapters: {len(chapter_groups)}")
-    for chapter_num, title, files in chapter_groups:
-        print(f"Chapter {chapter_num:02d}: {title}")
-        for j, file in enumerate(files):
-            label = f"{chapter_num:02d}.{j}" if j > 0 else f"{chapter_num:02d}.0"
-            print(f"  → {label} - {file}")
-    
-    print(f"\nBack matter files: {len(backmatter_files)}")
-    for f in backmatter_files:
-        print(f"  → {f}")
-    
-    print("=" * 50)
-    
+        else:
+            current_chapter_files.append(file)
+
+    # Add the final chapter if one is open
+    if current_chapter_files:
+        chapter_groups.append((chapter_index, current_chapter_title or "Untitled", current_chapter_files))
+
+    # Print summary
+    print(f"Frontmatter files: {len(frontmatter_files)}")
+    print(f"Chapters: {len(chapter_groups)}")
+    for num, title, files in chapter_groups:
+        print(f"  Chapter {num:02d}: {title} ({len(files)} files)")
+    print(f"Backmatter files: {len(backmatter_files)}")
+
     return chapter_groups, frontmatter_files, backmatter_files
 
 # === CLI ===
 
-def generate_obsidian_toc(conversion_log, output_dir: Path, book_title: str = None):
+def generate_obsidian_toc(conversion_log, output_dir: Path, book_title: str | None = None):
     """Create a Markdown-formatted TOC compatible with Obsidian based on actual output files."""
     book_title = book_title or ""
     toc_lines = ["# Table of Contents", ""]
@@ -1553,6 +1508,10 @@ def convert_book(
     import json
     from pathlib import Path
     from datetime import datetime
+    import time
+
+    # Start timer for elapsed time
+    start = time.time()
     
     # Convert string paths to Path objects
     epub_file = Path(epub_path).resolve()
@@ -1594,121 +1553,82 @@ def convert_book(
     
     opf_path = find_opf_path(temp_dir)
     content_root = opf_path.parent
-    
+
     # Handle different EPUB folder structures
     potential_content_roots = [
         content_root,
         content_root / "html",
         content_root / "EPUB",
     ]
-    
+
     actual_content_root = None
     for root in potential_content_roots:
         if root.exists() and any(root.glob("*.xhtml")):
             actual_content_root = root
             break
-    
+
     if actual_content_root is None:
         actual_content_root = content_root
         print(f"[WARNING] Could not find XHTML files in expected locations, using: {content_root}")
-    
+
     content_root = actual_content_root
     print(f"[INFO] Using content root: {content_root}")
     
     # Extract book title from copyright statement
     book_title = extract_book_title_from_copyright(content_root)
     if book_title:
-        safe_book_title = safe_filename(book_title)
-        output_dir = output_dir_base / safe_book_title
+        safe_book_title = safe_filename(str(book_title))
+        output_dir_path = Path(output_dir_base) / safe_book_title
         print(f"[INFO] Using book title for folder: {safe_book_title}")
     else:
-        output_dir = output_dir_base / epub_file.stem
+        output_dir_path = Path(output_dir_base) / epub_file.stem
         print(f"[INFO] Using EPUB filename for folder: {epub_file.stem}")
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_dir_path.mkdir(parents=True, exist_ok=True)
     
     # Update conversion_log
-    conversion_log["output_dir"] = str(output_dir)
+    conversion_log["output_dir"] = str(output_dir_path)
     conversion_log["book_title"] = book_title if book_title else epub_file.stem
     
     # Copy images directory if present
     if not skip_images:
         images_src = content_root / "images"
-        images_dst = output_dir / "images"
+        images_dst = output_dir_path / "images"
         if images_src.exists() and images_src.is_dir():
             shutil.copytree(images_src, images_dst, dirs_exist_ok=True)
             print(f"Copied images to: {images_dst}")
         conversion_log["images_moved"] = images_src.exists() and images_src.is_dir() and any(images_src.iterdir())
     
-    # Parse the Table of Contents
-    toc_file = content_root / "toc.xhtml"
-    if not toc_file.exists():
-        print("Error: toc.xhtml not found.")
-        return {"status": "error", "message": "toc.xhtml not found"}
-    
-    toc_entries = parse_toc_xhtml(toc_file)
-    conversion_log["toc_entries"] = [
-        {"file": f, "anchor": a, "label": l, "depth": d}
-        for f, a, l, d in toc_entries
-    ]
-    
-    # List all xhtml files in content_root
-    all_xhtml_files = {f.name for f in content_root.glob("*.xhtml")}
-    
-    # Remove toc.xhtml from processing
-    all_xhtml_files.discard("toc.xhtml")
-    
-    conversion_log["xhtml_files_in_epub"] = sorted(list(all_xhtml_files))
-    toc_xhtml_files = [file for file, _, _, _ in toc_entries]
-    toc_used = set(toc_xhtml_files)
-    
-    # Front matter: files not referenced in TOC
-    old_front_matter = sorted(all_xhtml_files - toc_used)
-    conversion_log["unlinked_files"] = sorted(list(old_front_matter))
-    
-    # Back matter detection
-    back_keywords = ["references", "glossary", "index"]
-    back_matter = []
-    
-    # Filter TOC entries to main chapters (depth 1)
-    toc_main_entries = [(f, a, l, d) for f, a, l, d in toc_entries if d == 1]
-    
-    filtered_toc_main_entries = []
-    for file, anchor, label, depth in toc_main_entries:
-        xhtml_path = content_root / file
-        title = extract_title_from_xhtml(xhtml_path).lower()
-        if any(keyword in title for keyword in back_keywords):
-            back_matter.append(file)
-        else:
-            filtered_toc_main_entries.append((file, anchor, label, depth))
-    
-    # Build TOC-driven structure
-    print("\n=== BUILDING TOC-DRIVEN STRUCTURE ===")
-    chapter_groups, front_matter, back_matter = build_toc_driven_structure(filtered_toc_main_entries, content_root)
-    
+    # === SPINE-DRIVEN STRUCTURE ===
+    with open(opf_path, "r", encoding="utf-8") as f:
+        opf_soup = BeautifulSoup(f, "xml")
+
+    # Use the new spine-driven structure instead of TOC-driven.
+    chapter_groups, front_matter, back_matter = build_spine_driven_structure(opf_soup, content_root)
+
     # Debug output
-    print("\n=== TOC-DRIVEN STRUCTURE RESULTS ===")
+    print("\n=== SPINE-DRIVEN STRUCTURE RESULTS ===")
     print(f"Total chapters: {len(chapter_groups)}")
     for i, (num, title, files) in enumerate(chapter_groups, 1):
         print(f"Chapter {i}: {title} ({len(files)} files)")
         for j, file in enumerate(files, 1):
             print(f"  {j}. {file}")
-    
+
     print(f"\nFront matter: {len(front_matter)} files")
     for file in front_matter:
         print(f"  - {file}")
-    
+
     print(f"\nBack matter: {len(back_matter)} files")
     for file in back_matter:
         print(f"  - {file}")
-    
+
     print("[INFO] Subsections that are anchors within the same XHTML file will remain as part of that file")
-    
+
     conversion_log["chapter_groups"] = [
         {"chapter_num": f"{num:02d}", "title": title, "files": group}
         for num, title, group in chapter_groups
     ]
-    
+
     # Add chapter grouping metadata
     conversion_log["chapter_grouping_metadata"] = {
         "total_chapters": len(chapter_groups),
@@ -1719,7 +1639,7 @@ def convert_book(
         "content_root_used": str(content_root),
         "epub_structure_type": "OEBPS/html" if "html" in str(content_root) else "OEBPS" if "OEBPS" in str(content_root) else "EPUB" if "EPUB" in str(content_root) else "Unknown"
     }
-    
+
     # Assign labels to chapters
     chapter_map = {}
     for num, title, group in chapter_groups:
@@ -1751,32 +1671,24 @@ def convert_book(
         run_pandoc(xhtml_path, md_temp_path)
     print(f"[Phase 1] Converted {len(xhtml_files_for_md)} XHTML files to Markdown in temp folder: {temp_md_dir}")
     
-    # Phase 2: File Organization
+    # === PHASE 2: FILE ORGANIZATION ===
     print("\n=== PHASE 2: FILE ORGANIZATION ===")
-    for num, title, group in chapter_groups:
-        label = f"{num:02d}.0"
-        print(f"\nProcessing Chapter {num}: {title}")
-        
-        for fname in group:
-            xhtml_path = content_root / fname
-            title = extract_title_from_xhtml(xhtml_path)
-            safe_title = safe_filename(title)
-            output_filename = f"{label} - {safe_title}.md"
-            
-            md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
-            output_path = output_dir / output_filename
-            
-            if not md_temp_path.exists():
-                warning = f"Expected markdown not found: {md_temp_path.name}"
-                print(f"Warning: {warning}")
-                conversion_log["warnings"].append(warning)
-                continue
-            
-            # Move/rename the file
+
+    # Assign labels and process front matter
+    from string import ascii_lowercase
+    for i, fname in enumerate(front_matter):
+        label = f"00{ascii_lowercase[i]}"
+        xhtml_path = content_root / fname
+        title = extract_title_from_xhtml(xhtml_path)
+        safe_title = safe_filename(title)
+        output_filename = f"{label} - {safe_title}.md"
+
+        md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
+        output_path = output_dir_path / output_filename
+
+        if md_temp_path.exists():
             shutil.move(str(md_temp_path), str(output_path))
-            
             chapter_map[fname] = output_filename
-            # Log for JSON
             conversion_log["chapters"].append({
                 "index": label,
                 "title": title,
@@ -1784,13 +1696,60 @@ def convert_book(
                 "output_file": output_filename,
                 "output_path": str(output_path)
             })
-            
-            print(f"  {fname} -> {output_filename}")
+            print(f"  [FRONT] {fname} -> {output_filename}")
+
+    # Assign labels and process chapters
+    for num, title, group in chapter_groups:
+        print(f"\nProcessing Chapter {num:02d}: {title}")
+        for idx, fname in enumerate(group):
+            label = f"{num:02d}.{idx}"
+            xhtml_path = content_root / fname
+            title = extract_title_from_xhtml(xhtml_path)
+            safe_title = safe_filename(title)
+            output_filename = f"{label} - {safe_title}.md"
+
+            md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
+            output_path = output_dir_path / output_filename
+
+            if md_temp_path.exists():
+                shutil.move(str(md_temp_path), str(output_path))
+                chapter_map[fname] = output_filename
+                conversion_log["chapters"].append({
+                    "index": label,
+                    "title": title,
+                    "source_files": [fname],
+                    "output_file": output_filename,
+                    "output_path": str(output_path)
+                })
+                print(f"  {fname} -> {output_filename}")
+
+    # Assign labels and process back matter
+    for i, fname in enumerate(back_matter):
+        label = f"{90 + i}"
+        xhtml_path = content_root / fname
+        title = extract_title_from_xhtml(xhtml_path)
+        safe_title = safe_filename(title)
+        output_filename = f"{label} - {safe_title}.md"
+
+        md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
+        output_path = output_dir_path / output_filename
+
+        if md_temp_path.exists():
+            shutil.move(str(md_temp_path), str(output_path))
+            chapter_map[fname] = output_filename
+            conversion_log["chapters"].append({
+                "index": label,
+                "title": title,
+                "source_files": [fname],
+                "output_file": output_filename,
+                "output_path": str(output_path)
+            })
+            print(f"  [BACK] {fname} -> {output_filename}")
     
     # Phase 3: Markdown Cleanup
     print("\n=== PHASE 3: MARKDOWN CLEANUP ===")
     for entry in conversion_log["chapters"]:
-        md_path = output_dir / entry["output_file"]
+        md_path = output_dir_path / entry["output_file"]
         if not md_path.exists():
             continue
         
@@ -1808,7 +1767,7 @@ def convert_book(
     if use_obsidian_format:
         print("\n=== PHASE 4: CROSS-LINK REWRITING ===")
         for entry in conversion_log["chapters"]:
-            md_path = output_dir / entry["output_file"]
+            md_path = output_dir_path / entry["output_file"]
             if not md_path.exists():
                 continue
             
@@ -1824,8 +1783,8 @@ def convert_book(
             print(f"Rewrote links: {entry['output_file']}")
     
     # Generate Obsidian TOC
-    toc_filename = generate_obsidian_toc(conversion_log, output_dir, str(book_title) if book_title is not None else "")
-    toc_path = output_dir / toc_filename
+    toc_filename = generate_obsidian_toc(conversion_log, output_dir_path, str(book_title) if book_title is not None else "")
+    toc_path = output_dir_path / toc_filename
     print(f"[INFO] Generated Obsidian-compatible TOC: {toc_path}")
     
     # Phase 5: YAML Header Injection
@@ -1844,7 +1803,7 @@ def convert_book(
             
             # Generate YAML headers for all chapters
             for entry in conversion_log["chapters"]:
-                md_path = output_dir / entry["output_file"]
+                md_path = output_dir_path / entry["output_file"]
                 if not md_path.exists():
                     continue
                 
@@ -1891,6 +1850,8 @@ def convert_book(
         json.dump(conversion_log, f, indent=2)
     print(f"Log saved to: {log_path}")
     
+    # Show macOS summary dialog (uncommented for macOS)
+    show_final_dialog(conversion_log, time.time() - start, md_status=True, cleanup_status=True, json_status=True)
     return conversion_log
 
 # --- CLI interface ---
