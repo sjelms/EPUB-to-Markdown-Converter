@@ -91,6 +91,91 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
         elif isinstance(element, str) and element.strip().startswith('<!DOCTYPE'):
             element.extract()
     
+    # === ENHANCED TAG HANDLING ===
+    # Convert <i> and <em> to Markdown italic, <b> and <strong> to Markdown bold
+    # This is more efficient than converting <i> to <em> first
+    
+    # Handle italic tags (<i> and <em>)
+    for tag in soup.find_all(['i', 'em']):
+        try:
+            if tag.name in ['i', 'em']:
+                # Replace with Markdown italic syntax
+                from bs4.element import NavigableString
+                tag.replace_with(NavigableString(f"*{tag.get_text()}*"))
+        except (AttributeError, TypeError):
+            continue
+    
+    # Handle bold tags (<b> and <strong>)
+    for tag in soup.find_all(['b', 'strong']):
+        try:
+            if tag.name in ['b', 'strong']:
+                # Replace with Markdown bold syntax
+                from bs4.element import NavigableString
+                tag.replace_with(NavigableString(f"**{tag.get_text()}**"))
+        except (AttributeError, TypeError):
+            continue
+    
+    # === SYMBOL CLEANUP ===
+    # Remove trademark symbols and other special characters
+    for text in soup.find_all(text=True):
+        try:
+            if text.parent and hasattr(text.parent, 'name') and text.parent.name not in ['script', 'style']:
+                # Remove trademark symbols
+                from bs4.element import NavigableString
+                cleaned_text = text.replace('™', '').replace('©', '').replace('®', '')
+                if cleaned_text != text:
+                    text.replace_with(NavigableString(cleaned_text))
+        except (AttributeError, TypeError):
+            continue
+    
+    # === FIGURE AND CAPTION HANDLING ===
+    # Process figures and captions before general cleanup to preserve structure
+    for figure in soup.find_all('figure'):
+        try:
+            # Extract image info
+            img = figure.find('img')
+            if img:
+                src = img.get('src', '')
+                alt = img.get('alt', 'figure')
+                
+                # Fix image path: ensure it's images/filename.jpg format
+                if src:
+                    import os
+                    # Get just the filename from the path
+                    image_filename = os.path.basename(src)
+                    # Ensure the path is images/filename format
+                    new_src = f"images/{image_filename}"
+                    img['src'] = new_src
+                
+                # Create proper Markdown image tag
+                markdown_img = f"![{alt}]({new_src})"
+                
+                # Extract caption from figcaption
+                caption_text = ""
+                figcaption = figure.find('p', class_='figcaption')
+                if figcaption:
+                    # Remove any anchor links and extract just the text
+                    for a_tag in figcaption.find_all('a'):
+                        # Get the text content, ignoring the href
+                        caption_text = a_tag.get_text(strip=True)
+                        # Remove any remaining HTML tags
+                        caption_text = re.sub(r'<[^>]+>', '', caption_text)
+                        break
+                    
+                    if not caption_text:
+                        # Fallback: get text from figcaption directly
+                        caption_text = figcaption.get_text(strip=True)
+                        caption_text = re.sub(r'<[^>]+>', '', caption_text)
+                
+                # Replace the entire figure with Markdown image and caption
+                from bs4.element import NavigableString
+                if caption_text:
+                    figure.replace_with(NavigableString(f"{markdown_img}\n\n{caption_text}"))
+                else:
+                    figure.replace_with(NavigableString(markdown_img))
+        except (AttributeError, TypeError):
+            continue
+    
     # Remove unwanted tags that don't carry semantic meaning
     unwanted_tags = ['span', 'div']
     for tag in soup.find_all(unwanted_tags):
@@ -133,10 +218,10 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
     markdown_text = md(
         str(soup), 
         heading_style="ATX",  # Use # style headings
-        em_symbol="—",       # Preserve em-dashes
-        strong_symbol="**",  # Use ** for bold
-        code_symbol="`",     # Use ` for inline code
-        bullets="-",         # Use - for bullet lists
+        em_symbol="*",        # Use * for italic (since we already converted <i>/<em>)
+        strong_symbol="**",   # Use ** for bold (since we already converted <b>/<strong>)
+        code_symbol="`",      # Use ` for inline code
+        bullets="-",          # Use - for bullet lists
         strip=['script', 'style']  # Remove script and style tags
     )
     
@@ -360,6 +445,108 @@ def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=
     markdown_text = re.sub(r'understanding the chair\?\n\)', 'understanding the chair?)', markdown_text)
     markdown_text = re.sub(r'about the concept\.\n\)', 'about the concept.)', markdown_text)
     
+    # === ENHANCED CLEANUP FOR OFFSITE ARCHITECTURE ISSUES ===
+    
+    # Fix malformed image paths with file extension before folder path
+    # Pattern: ![fig2](1.jpgimages/fig21.jpg) → ![fig2](images/fig2_1.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\((\d+)\.(jpg|png|gif)([^)]*?images/[^)]*?)(\d+)\.(jpg|png|gif)\)', 
+                          r'![\1](images/fig\2_\5.\6)', markdown_text)
+    
+    # Fix image paths where underscores were removed
+    # Pattern: ![fig2](images/fig21.jpg) → ![fig2](images/fig2_1.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\(images/fig(\d+)(\d+)\.(jpg|png|gif)\)', 
+                          r'![\1](images/fig\2_\3.\4)', markdown_text)
+    
+    # Fix more complex malformed image paths
+    # Pattern: ![fig2](1.jpgimages/fig21.jpg) → ![fig2](images/fig2_1.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\((\d+)\.(jpg|png|gif|tif)([^)]*?)(\d+)\.(jpg|png|gif|tif)\)', 
+                          r'![\1](images/fig\2_\5.\6)', markdown_text)
+    
+    # Fix image paths with tif extension issues
+    # Pattern: ![fig2](2.tifimages/fig22.jpg) → ![fig2](images/fig2_2.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\]\((\d+)\.(tif)([^)]*?)(\d+)\.(jpg|png|gif)\)', 
+                          r'![\1](images/fig\2_\5.\6)', markdown_text)
+    
+    # Remove LINK_PLACEHOLDER_ artifacts from captions
+    # Pattern: LINK_PLACEHOLDER_Figure 2.1 → Figure 2.1
+    markdown_text = re.sub(r'LINK_PLACEHOLDER_([^_\n]+)', r'\1', markdown_text)
+    
+    # Remove stray code from captions
+    # Pattern: __System structural isomorphism (left) and equifinality (right)___04a-9781315743332_List_of_figures.xhtml#fig2_1
+    # → System structural isomorphism (left) and equifinality (right)
+    markdown_text = re.sub(r'__([^_]+)___[^_\n]+', r'\1', markdown_text)
+    
+    # Fix forced line breaks caused by inline tags on their own lines
+    # Pattern: word\n\n*italic*\n\nword → word *italic* word
+    markdown_text = re.sub(r'([a-zA-Z])\n\n\*([^*]+)\*\n\n([a-zA-Z])', r'\1 *\2* \3', markdown_text)
+    markdown_text = re.sub(r'([a-zA-Z])\n\n\*\*([^*]+)\*\*\n\n([a-zA-Z])', r'\1 **\2** \3', markdown_text)
+    
+    # Fix stray parentheses that appear after text
+    # Pattern: text) → text
+    markdown_text = re.sub(r'([a-zA-Z])\n\)', r'\1', markdown_text, flags=re.MULTILINE)
+    
+    # Remove leftover XHTML code artifacts
+    # Pattern: any remaining HTML-like tags or attributes
+    markdown_text = re.sub(r'<[^>]+>', '', markdown_text)
+    markdown_text = re.sub(r'xmlns="[^"]*"', '', markdown_text)
+    markdown_text = re.sub(r'class="[^"]*"', '', markdown_text)
+    
+    # Fix escaped backslashes in image tags
+    # Pattern: ![fig2\](images/fig1_1.jpg) → ![fig2](images/fig1_1.jpg)
+    markdown_text = re.sub(r'!\[([^\]]+)\\\]\(([^)]+)\)', r'![\1](\2)', markdown_text)
+    
+    # Fix broken caption formatting
+    # Pattern: [Figure 2.1 → Figure 2.1
+    markdown_text = re.sub(r'\[Figure ([^\]\n]+)', r'Figure \1', markdown_text)
+    
+    # Fix broken caption formatting with trailing artifacts
+    # Pattern: [Figure 2.1\n](\System structural isomorphism... → Figure 2.1\n\nSystem structural isomorphism...
+    markdown_text = re.sub(r'\[Figure ([^\]\n]+)\n\]\([^)]+\)', r'Figure \1', markdown_text)
+    
+    # Remove remaining link artifacts from captions
+    # Pattern: ](\System structural isomorphism (left) and equifinality (right)\\__04a-9781315743332_List_of_figures.xhtml#fig2_1 → System structural isomorphism (left) and equifinality (right)
+    markdown_text = re.sub(r'\]\([^)]*?___[^)]*?\)', '', markdown_text)
+    
+    # Remove trailing artifacts after figure captions
+    # Pattern: ](System structural isomorphism (left) and equifinality (right)\__04a-9781315743332_List_of_figures.xhtml#fig2_1 → System structural isomorphism (left) and equifinality (right)
+    markdown_text = re.sub(r'\]\(([^)]*?)\__[^)]*?\)', r'\1', markdown_text)
+    
+    # Clean up any remaining escaped backslashes in text
+    markdown_text = re.sub(r'\\([^\\])', r'\1', markdown_text)
+    
+    # Fix double underscores in headings and text
+    markdown_text = re.sub(r'\\_\\_([^_]+)\\\_\\_', r'\1', markdown_text)
+    
+    # === CRITICAL FIXES FOR BOLD TEXT AND HEADINGS ===
+    
+    # Fix escaped backslashes that should be bold text
+    # Pattern: \text\ → **text**
+    markdown_text = re.sub(r'\\([^\\]+)\\', r'**\1**', markdown_text)
+    
+    # Fix missing headings that got merged with text
+    # Pattern: **Case study: the Cellophane House** some points from a case study → ## Case study: the Cellophane House\n\nsome points from a case study
+    markdown_text = re.sub(r'\*\*([^*]+)\*\*([^\n]+?)(In the following section)', r'## \1\n\n\3', markdown_text)
+    
+    # Fix other missing headings
+    # Pattern: **Integrated complexity** → ## Integrated complexity
+    markdown_text = re.sub(r'\*\*([^*]+)\*\*([^\n]+?)(Although it is perhaps)', r'## \1\n\n\3', markdown_text)
+    
+    # Fix missing headings for parallel and serially nested deliveries
+    # Pattern: **Parallel and serially nested deliveries** → ## Parallel and serially nested deliveries
+    markdown_text = re.sub(r'\*\*([^*]+)\*\*([^\n]+?)(In some cases)', r'## \1\n\n\3', markdown_text)
+    
+    # Fix missing headings for case study
+    # Pattern: **Case study: the Cellophane House** → ## Case study: the Cellophane House
+    markdown_text = re.sub(r'\*\*([^*]+)\*\*([^\n]+?)(One of the several)', r'## \1\n\n\3', markdown_text)
+    
+    # Fix missing headings for key conclusions
+    # Pattern: **Key conclusions and further research** → ## Key conclusions and further research
+    markdown_text = re.sub(r'\*\*([^*]+)\*\*([^\n]+?)(The notion)', r'## \1\n\n\3', markdown_text)
+    
+    # Fix missing headings for notes
+    # Pattern: **Notes** → ## Notes
+    markdown_text = re.sub(r'\*\*([^*]+)\*\*([^\n]+?)(1 taking)', r'## \1\n\n\3', markdown_text)
+    
     # Fix broken links (missing closing parenthesis)
     markdown_text = re.sub(r'\[([^\]]+)\]\(([^)]+)$', r'[\1](\2)', markdown_text, flags=re.MULTILINE)
     
@@ -370,7 +557,7 @@ def post_process_markdown(markdown_text: str, chapter_map=None, image_positions=
     markdown_text = re.sub(r'\)\n\n# ([^#\n]+)\n\n\)', r')\n\n# \1', markdown_text)
     markdown_text = re.sub(r'\)\n\n# ([^#\n]+)\n\n\)', r')\n\n# \1', markdown_text)
     
-        # Add line breaks after images for better formatting
+    # Add line breaks after images for better formatting
     markdown_text = re.sub(r'!\[([^\]]+)\]\(([^)]+)\)([^\n])', r'![\1](\2)\n\3', markdown_text)
     
     # === PHASE 4: HEADING-BASED IMAGE POSITIONING ===
