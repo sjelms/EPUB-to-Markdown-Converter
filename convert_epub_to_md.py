@@ -1,3 +1,16 @@
+# === Helper functions for frontmatter and backmatter detection ===
+def is_frontmatter_file(filename: str, title: str = "") -> bool:
+    lower_name = filename.lower()
+    lower_title = title.lower() if title else ""
+    return any(kw in lower_name for kw in ("cover", "title", "copyright", "acknowledgements", "praise", "brand", "about")) or \
+           any(kw in lower_title for kw in ("acknowledgements", "introduction", "about the author", "preface", "foreword"))
+
+def is_backmatter_file(filename: str, title: str = "") -> bool:
+    lower_name = filename.lower()
+    lower_title = title.lower() if title else ""
+    return any(kw in lower_name for kw in ("index", "references", "appendix", "bibliography", "notes")) or \
+           any(kw in lower_title for kw in ("index", "references", "conclusion", "bibliography", "appendix", "notes"))
+
 import re
 from markdownify import markdownify as md
 
@@ -81,6 +94,8 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
     if not md_content.strip().startswith('<'):
         return post_process_markdown(md_content, chapter_map)
     
+    # Store original HTML for image-only page detection after conversion
+    raw_html = md_content
     soup = BeautifulSoup(md_content, 'html.parser')
     
     # === PRE-PROCESSING: Fix HTML structure before conversion ===
@@ -190,7 +205,8 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
     
     # === CONVERSION ===
     # Pass the full DOM to markdownify
-    markdown_text = md(
+    import markdownify
+    markdown_text = markdownify.markdownify(
         str(soup),
         heading_style="ATX",
         em_symbol="*",
@@ -199,7 +215,20 @@ def clean_markdown_text(md_content: str, chapter_map=None) -> str:
         code_symbol="`",
         strip=['script', 'style'],
     )
-    
+
+    # === SPECIAL HANDLING: Detect image-only pages and convert <img> tags to Markdown ===
+    # If the original raw_html contains only an <img> tag (no <h1>, <h2>, <p>, <div>, <section> or text content)
+    # Place this after markdownify and before writing .md file
+    if "<img" in raw_html and all(tag not in raw_html for tag in ("<p", "<h1", "<h2", "<div", "<section")):
+        soup_img = BeautifulSoup(raw_html, "html.parser")
+        img_tag = soup_img.find("img")
+        if img_tag and img_tag.get("src"):
+            img_src = img_tag["src"]
+            # Classify as front or back matter based on spine position is not possible here, but we ensure the image is preserved
+            img_md = f"![]({img_src})"
+            markdown_text = img_md  # overwrite with just the image if it's the only content
+            print(f"[INFO] Image-only page detected: inserted Markdown image tag for {img_src}")
+
     # === POST-PROCESSING ===
     return post_process_markdown(markdown_text, chapter_map)
 
@@ -1038,151 +1067,38 @@ def extract_title_from_xhtml(xhtml_path: Path) -> str:
 
 def extract_xhtml_metadata(xhtml_path: Path) -> dict:
     """
-    Extract comprehensive metadata from XHTML file including:
-    - title
-    - body type (frontmatter, bodymatter, backmatter)
-    - section id and type
-    - chapter information
-    
-    ENHANCED: Now searches for IDs on ANY tag within the body, not just section/div tags.
-    This fixes the subsection detection issue where level IDs are placed on h1, h2, p tags, etc.
+    Enhanced front/back matter detection based on title and filename patterns.
+    Returns dict with title, is_frontmatter, is_backmatter, is_chapter.
     """
-    with open(xhtml_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'xml')
-    
-    metadata = {
-        'title': "Untitled",
-        'body_type': None,
-        'section_id': None,
-        'section_type': None,
-        'is_frontmatter': False,
-        'is_chapter': False,
-        'is_backmatter': False,
-        'chapter_number': None,
-        'level': None,
-        'subsection_number': None,
-        'all_ids': []  # NEW: Track all IDs in the file
+    from bs4 import BeautifulSoup
+
+    with open(xhtml_path, "r", encoding="utf-8") as f:
+        soup = BeautifulSoup(f, "lxml")
+
+    title_tag = soup.find(["h1", "title"])
+    title = title_tag.get_text(strip=True) if title_tag else xhtml_path.stem
+
+    lower_title = title.lower()
+    lower_filename = xhtml_path.stem.lower()
+
+    # Front matter patterns
+    front_keywords = (
+        "cover", "title", "copyright", "acknowledgements", "praise", "brand", "about", "preface", "foreword", "introduction"
+    )
+    back_keywords = (
+        "index", "references", "appendix", "bibliography", "conclusion", "notes"
+    )
+
+    is_frontmatter = any(k in lower_title for k in front_keywords) or any(k in lower_filename for k in front_keywords)
+    is_backmatter = any(k in lower_title for k in back_keywords) or any(k in lower_filename for k in back_keywords)
+    is_chapter = not (is_frontmatter or is_backmatter)
+
+    return {
+        "title": title,
+        "is_frontmatter": is_frontmatter,
+        "is_backmatter": is_backmatter,
+        "is_chapter": is_chapter
     }
-    
-    # Extract title
-    title_tag = soup.find('title')
-    if title_tag:
-        raw_title = title_tag.get_text(strip=True)
-        metadata['title'] = title_case(raw_title)
-    
-    # Extract body type from body tag
-    body_tag = soup.find('body')
-    if body_tag and isinstance(body_tag, Tag):
-        metadata['body_type'] = body_tag.get('epub:type')
-    
-    # --- ENHANCED SECTION ID DETECTION ---
-    # Find ALL tags in the body that have ID attributes, not just the first one
-    # This is crucial for detecting subsections that are anchors within the same file
-    if body_tag and isinstance(body_tag, Tag):
-        all_id_tags = body_tag.find_all(id=True)
-        for tag in all_id_tags:
-            if isinstance(tag, Tag) and tag.get('id'):
-                metadata['all_ids'].append(tag.get('id'))
-    
-    # Use the first ID for primary classification (usually the main section/chapter ID)
-    if metadata['all_ids']:
-        primary_id = metadata['all_ids'][0]
-        metadata['section_id'] = primary_id
-        
-        # Get the type from the first tag with an ID
-        first_id_tag = None
-        if body_tag and isinstance(body_tag, Tag):
-            first_id_tag = body_tag.find(id=primary_id)
-        if first_id_tag and isinstance(first_id_tag, Tag):
-            metadata['section_type'] = first_id_tag.get('epub:type')
-    # --- END ENHANCED SECTION ---
-    
-    # Determine content type based on metadata
-    section_id = str(metadata['section_id'] or "")
-    body_type = str(metadata['body_type'] or "")
-    section_type = str(metadata['section_type'] or "")
-    title_upper = metadata['title'].upper()
-    
-    # Frontmatter detection (comprehensive)
-    if (body_type == "frontmatter" or 
-        section_id.startswith("frontmatter_") or
-        section_id.startswith("page_") or  # Roman numeral pages
-        "titlepage" in section_type or
-        "toc" in section_type or
-        "preface" in section_id.lower() or
-        "acknowledgements" in section_id.lower() or
-        "abouttheauthors" in section_id.lower() or
-        "introduction" in section_id.lower() or
-        title_upper in ["CONTENTS", "ACKNOWLEDGEMENTS", "ABOUT THE AUTHORS", "INTRODUCTION"]):
-        metadata['is_frontmatter'] = True
-    
-    # Chapter detection (comprehensive)
-    elif (section_id.startswith("ch") or
-          section_id.startswith("chapter") or
-          section_id.startswith("Sec") or  # Springer format
-          section_type == "chapter" or
-          (title_upper and "CHAPTER" in title_upper)):
-        metadata['is_chapter'] = True
-        # Extract chapter number from various formats using regex for better reliability
-        if section_id.startswith("ch"):
-            try:
-                match = re.search(r'\d+', section_id)
-                if match:
-                    metadata['chapter_number'] = int(match.group())
-            except (ValueError, AttributeError):
-                pass
-        elif section_id.startswith("chapter"):
-            try:
-                match = re.search(r'\d+', section_id)
-                if match:
-                    metadata['chapter_number'] = int(match.group())
-            except (ValueError, AttributeError):
-                pass
-        elif section_id.startswith("Sec"):
-            try:
-                match = re.search(r'\d+', section_id)
-                if match:
-                    metadata['chapter_number'] = int(match.group())
-            except (ValueError, AttributeError):
-                pass
-        # Extract from title if section_id doesn't have number
-        elif "CHAPTER" in title_upper:
-            match = re.search(r'CHAPTER\s+(\d+)', title_upper)
-            if match:
-                try:
-                    metadata['chapter_number'] = int(match.group(1))
-                except ValueError:
-                    pass
-    
-    # Level detection within chapters (comprehensive)
-    # ENHANCED: More robust regex parsing to handle variations in level ID formats
-    elif section_id.startswith("level"):
-        parts = section_id.split("_")
-        if len(parts) >= 2:
-            level_part = parts[0]
-            if level_part.startswith("level"):
-                try:
-                    metadata['level'] = int(level_part[5:])
-                    # Extract subsection number from the second part using regex
-                    if len(parts) >= 2:
-                        try:
-                            # Use regex to find number in case of extra chars
-                            match = re.search(r'\d+', parts[1])
-                            if match:
-                                metadata['subsection_number'] = int(match.group())
-                        except (ValueError, AttributeError):
-                            pass
-                except (ValueError, AttributeError):
-                    pass
-    
-    # Backmatter detection (comprehensive)
-    elif (section_id in ["references", "index", "glossary", "bibliography", "conclusion"] or
-          title_upper in ["REFERENCES", "INDEX", "GLOSSARY", "BIBLIOGRAPHY", "CONCLUSION"] or
-          "references" in section_id.lower() or
-          "index" in section_id.lower()):
-        metadata['is_backmatter'] = True
-    
-    return metadata
 
 def extract_subsections_from_xhtml(xhtml_path: Path) -> list:
     """
@@ -1331,45 +1247,40 @@ def build_spine_driven_structure(opf_soup, content_root: Path) -> tuple:
     # Resolve hrefs for spine items
     spine_files = [manifest[item_id]["href"] for item_id in spine_ids if item_id in manifest]
 
-    # Extract metadata for each spine file
+    # --- NEW GROUPING LOGIC BASED ON NUMERIC PREFIXES ---
+    import re
+    from collections import defaultdict
+    from pathlib import Path
+    # Group files by numeric prefix (e.g., chapter010, chapter010-01, etc.)
+    chapter_files = defaultdict(list)
+    for file in spine_files:
+        match = re.match(r"(.*?)([-_]?(\d{2,3}))?\.xhtml$", Path(file).stem)
+        if match:
+            prefix = match.group(1)
+            base_key = prefix.rstrip("-_")
+            chapter_files[base_key].append(file)
+        else:
+            chapter_files[file].append(file)  # fallback
+
+    # Sort groups by inferred order
+    sorted_keys = sorted(chapter_files.keys())
     chapter_groups = []
     frontmatter_files = []
     backmatter_files = []
 
     chapter_index = 1
-    current_chapter_files = []
-    current_chapter_title = None
-
-    for file in spine_files:
-        xhtml_path = content_root / file
-        if not xhtml_path.exists():
-            print(f"[WARNING] Missing file in spine: {file}")
-            continue
-
-        metadata = extract_xhtml_metadata(xhtml_path)
-        title = metadata.get("title") or file
-
-        # Determine section type
-        if metadata.get("is_frontmatter"):
-            frontmatter_files.append(file)
-        elif metadata.get("is_backmatter"):
-            if current_chapter_files:
-                chapter_groups.append((chapter_index, current_chapter_title or "Untitled", current_chapter_files))
-                chapter_index += 1
-                current_chapter_files = []
-            backmatter_files.append(file)
-        elif metadata.get("is_chapter"):
-            if current_chapter_files:
-                chapter_groups.append((chapter_index, current_chapter_title or "Untitled", current_chapter_files))
-                chapter_index += 1
-            current_chapter_files = [file]
-            current_chapter_title = title
+    for key in sorted_keys:
+        files = sorted(chapter_files[key])
+        first_file = files[0]
+        title = extract_title_from_xhtml(content_root / first_file)
+        # Use the same logic for front/back matter as previously
+        if is_frontmatter_file(first_file, title):
+            frontmatter_files.extend(files)
+        elif is_backmatter_file(first_file, title):
+            backmatter_files.extend(files)
         else:
-            current_chapter_files.append(file)
-
-    # Add the final chapter if one is open
-    if current_chapter_files:
-        chapter_groups.append((chapter_index, current_chapter_title or "Untitled", current_chapter_files))
+            chapter_groups.append((chapter_index, title or key, files))
+            chapter_index += 1
 
     # Print summary
     print(f"Frontmatter files: {len(frontmatter_files)}")
@@ -1603,6 +1514,39 @@ def convert_book(
     with open(opf_path, "r", encoding="utf-8") as f:
         opf_soup = BeautifulSoup(f, "xml")
 
+    # --- TOC source detection (nav.xhtml and toc.ncx) ---
+    manifest_items = []
+    manifest_tag = opf_soup.find("manifest")
+    if manifest_tag:
+        for item in manifest_tag.find_all("item"):
+            item_dict = {
+                "id": item.get("id"),
+                "href": item.get("href"),
+                "media-type": item.get("media-type"),
+                "properties": item.get("properties", "")
+            }
+            manifest_items.append(item_dict)
+
+    # TOC source detection (safe dictionary access)
+    nav_item = None
+    ncx_item = None
+    for item in manifest_items:
+        if isinstance(item, dict):
+            if item.get("media-type") == "application/xhtml+xml" and "nav" in item.get("properties", ""):
+                nav_item = item
+            elif item.get("media-type") == "application/x-dtbncx+xml":
+                ncx_item = item
+
+    toc_source = None
+    if nav_item:
+        toc_source = nav_item["href"]
+        print(f"[INFO] Using nav.xhtml as TOC source: {toc_source}")
+    elif ncx_item:
+        toc_source = ncx_item["href"]
+        print(f"[INFO] Using toc.ncx as TOC fallback: {toc_source}")
+    else:
+        print("[WARNING] No TOC source (nav.xhtml or toc.ncx) found in manifest.")
+
     # Use the new spine-driven structure instead of TOC-driven.
     chapter_groups, front_matter, back_matter = build_spine_driven_structure(opf_soup, content_root)
 
@@ -1682,12 +1626,13 @@ def convert_book(
         xhtml_path = content_root / fname
         title = extract_title_from_xhtml(xhtml_path)
         safe_title = safe_filename(title)
-        # TOC file: assign label 100 to move to end if it's the raw XHTML-based TOC export
+        # TOC file: assign label 999 and rename if it's the raw XHTML-based TOC export
         if (
             "table of contents" in safe_title.lower()
             or safe_title.strip().lower() in {"toc", "contents"}
         ):
-            label = "100"
+            label = "999"
+            safe_title = "Reference TOC"
         output_filename = f"{label} - {safe_title}.md"
 
         md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
@@ -1713,12 +1658,13 @@ def convert_book(
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
             safe_title = safe_filename(title)
-            # TOC file: assign label 100 to move to end if it's the raw XHTML-based TOC export
+            # TOC file: assign label 999 and rename if it's the raw XHTML-based TOC export
             if (
                 "table of contents" in safe_title.lower()
                 or safe_title.strip().lower() in {"toc", "contents"}
             ):
-                label = "100"
+                label = "999"
+                safe_title = "Reference TOC"
             output_filename = f"{label} - {safe_title}.md"
 
             md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
@@ -1738,16 +1684,17 @@ def convert_book(
 
     # Assign labels and process back matter
     for i, fname in enumerate(back_matter):
-        label = f"{90 + i}"
+        label = f"{900 + i}"
         xhtml_path = content_root / fname
         title = extract_title_from_xhtml(xhtml_path)
         safe_title = safe_filename(title)
-        # TOC file: assign label 100 to move to end if it's the raw XHTML-based TOC export
+        # TOC file: assign label 999 and rename if it's the raw XHTML-based TOC export
         if (
             "table of contents" in safe_title.lower()
             or safe_title.strip().lower() in {"toc", "contents"}
         ):
-            label = "100"
+            label = "999"
+            safe_title = "Reference TOC"
         output_filename = f"{label} - {safe_title}.md"
 
         md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
