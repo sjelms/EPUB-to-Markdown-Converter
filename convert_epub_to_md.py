@@ -1651,10 +1651,11 @@ def convert_book(
     temp_md_dir = temp_dir / "md"
     temp_md_dir.mkdir(parents=True, exist_ok=True)
     
-    # Get all files that need to be converted
-    xhtml_files_for_md = []
+    # Get all files that need to be converted, including front and back matter
+    xhtml_files_for_md = list(front_matter)
     for _, _, group in chapter_groups:
         xhtml_files_for_md.extend(group)
+    xhtml_files_for_md.extend(back_matter)
     
     # Validation step
     for xhtml_file in xhtml_files_for_md:
@@ -1681,6 +1682,12 @@ def convert_book(
         xhtml_path = content_root / fname
         title = extract_title_from_xhtml(xhtml_path)
         safe_title = safe_filename(title)
+        # TOC file: assign label 100 to move to end if it's the raw XHTML-based TOC export
+        if (
+            "table of contents" in safe_title.lower()
+            or safe_title.strip().lower() in {"toc", "contents"}
+        ):
+            label = "100"
         output_filename = f"{label} - {safe_title}.md"
 
         md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
@@ -1706,6 +1713,12 @@ def convert_book(
             xhtml_path = content_root / fname
             title = extract_title_from_xhtml(xhtml_path)
             safe_title = safe_filename(title)
+            # TOC file: assign label 100 to move to end if it's the raw XHTML-based TOC export
+            if (
+                "table of contents" in safe_title.lower()
+                or safe_title.strip().lower() in {"toc", "contents"}
+            ):
+                label = "100"
             output_filename = f"{label} - {safe_title}.md"
 
             md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
@@ -1729,6 +1742,12 @@ def convert_book(
         xhtml_path = content_root / fname
         title = extract_title_from_xhtml(xhtml_path)
         safe_title = safe_filename(title)
+        # TOC file: assign label 100 to move to end if it's the raw XHTML-based TOC export
+        if (
+            "table of contents" in safe_title.lower()
+            or safe_title.strip().lower() in {"toc", "contents"}
+        ):
+            label = "100"
         output_filename = f"{label} - {safe_title}.md"
 
         md_temp_path = temp_md_dir / f"{Path(fname).stem}.md"
