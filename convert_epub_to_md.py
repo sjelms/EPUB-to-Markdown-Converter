@@ -1,5 +1,6 @@
 from pathlib import Path
-from bs4 import BeautifulSoup, Tag, NavigableString
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
 from typing import Union, Any
 
 def generate_markdown_outputs(
@@ -78,34 +79,51 @@ def assign_manifest_structure(manifest_map: list[dict]) -> list[dict]:
         chapter_map.append(item)
 
     return chapter_map
-def build_manifest_map(opf_soup, opf_path: Path) -> dict:
+def build_manifest_map(opf_soup, opf_path: Path) -> list[dict]:
     """Creates a manifest map based on spine and manifest structure."""
-    manifest_map = {}
+    manifest_items = []
     manifest = {item["id"]: item for item in opf_soup.find_all("item") if isinstance(item, Tag) and item.has_attr("id")}
     spine = opf_soup.find("spine")
     spine_items = spine.find_all("itemref") if spine else []
+    
     for index, itemref in enumerate(spine_items):
         if not isinstance(itemref, Tag):
             continue
         idref = itemref.get("idref")
+        if not idref:
+            continue
         manifest_item = manifest.get(idref)
         if not manifest_item:
             continue
         href = manifest_item.get("href")
-        media_type = manifest_item.get("media-type")
+        if not href:
+            continue
+        media_type = manifest_item.get("media-type", "")
         properties = manifest_item.get("properties", "")
         epub_type = itemref.get("epub:type", "")
+        
         # Construct absolute path to the content file
-        file_path = (opf_path.parent / href).resolve()
-        rel_path = Path(href).name
-        # Basic classification placeholder (refined later)
+        file_path = (opf_path.parent / str(href)).resolve()
+        filename = Path(str(href)).name
+        
+        # Basic classification based on filename
         classification = "chapter"
-        if any(kw in rel_path.lower() for kw in ("cover", "title", "copyright", "acknowledgements", "intro")):
+        if any(kw in filename.lower() for kw in ("cover", "title", "copyright", "acknowledgements", "intro")):
             classification = "frontmatter"
-        elif any(kw in rel_path.lower() for kw in ("index", "references", "appendix", "conclusion", "notes", "ref", "back")):
+        elif any(kw in filename.lower() for kw in ("index", "references", "appendix", "conclusion", "notes", "ref", "back")):
             classification = "backmatter"
-        manifest_map[rel_path] = file_path
-    return manifest_map
+        
+        manifest_items.append({
+            "filename": filename,
+            "filepath": file_path,
+            "classified_as": classification,
+            "media_type": str(media_type),
+            "properties": str(properties),
+            "epub_type": str(epub_type),
+            "spine_index": index
+        })
+    
+    return manifest_items
 import subprocess
 
 # Helper function to show a macOS dialog (restored for completion notification)
@@ -808,72 +826,9 @@ def find_opf_path(container_path: Path) -> Path:
         full_path = full_path[0]
     return Path(container_path) / full_path
 
-def run_pandoc(input_file: Path, output_file: Path):
-    """Converts a single XHTML file to Markdown using Pandoc.
 
-    This function is responsible for structural conversion only.
-    It does not perform post-processing cleanup (e.g., line merging, YAML injection).
-    """
-    try:
-        subprocess.run([
-            "/opt/homebrew/bin/pandoc",  # Full path to Pandoc binary
-            str(input_file),               # Input XHTML file
-            "-f", "html",                  # From format: HTML (XHTML compatible)
-            "-t", "markdown",              # To format: Markdown
-            "--wrap=none",                 # Prevent forced line breaks (natural wrapping)
-            "-o", str(output_file)         # Output Markdown file
-        ], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Error: Pandoc failed for file {input_file}")
-        raise e
 
-def parse_toc_xhtml(toc_path: Path):
-    """Parses toc.xhtml and returns a list of (filename, anchor, label, depth) in TOC order."""
-    from bs4 import BeautifulSoup
-    from bs4.element import Tag
-    with open(toc_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'xml')  # Use strict XML parsing
 
-    toc_entries = []
-
-    def process_ol(ol_tag, depth=1):
-        for li in ol_tag.find_all('li', recursive=False):
-            a_tag = li.find('a', href=True)
-            if a_tag and isinstance(a_tag, Tag):
-                href = a_tag.get('href', '')
-                if isinstance(href, list):
-                    href = href[0] if href else ''
-                label = a_tag.get_text(strip=True)
-                if href and '.xhtml' in href:
-                    if '#' in href:
-                        file_part, anchor = href.split('#', 1)
-                    else:
-                        file_part, anchor = href, None
-                    toc_entries.append((file_part, anchor, label, depth))
-            nested_ol = li.find('ol', recursive=False)
-            if nested_ol and isinstance(nested_ol, Tag):
-                process_ol(nested_ol, depth + 1)
-
-    nav = soup.find('nav')
-    if nav and isinstance(nav, Tag):
-        ol = nav.find('ol')
-        if ol and isinstance(ol, Tag):
-            process_ol(ol)
-    else:
-        # fallback to flat structure
-        for a in soup.find_all('a', href=True):
-            if isinstance(a, Tag):
-                href = a.get('href', '')
-                if isinstance(href, list):
-                    href = href[0] if href else ''
-                label = a.get_text(strip=True)
-                if href and '.xhtml' in href:
-                    if '#' in href:
-                        file_part, anchor = href.split('#', 1)
-                    else:
-                        file_part, anchor = href, None
-                    toc_entries.append((file_part, anchor, label, 1))
-    return toc_entries
 
 def extract_book_metadata_from_copyright(content_root: Path) -> dict | None:
     """Extract book metadata from copyright statement using RNIB_COPYRIGHT_LEGALESE IDs or fulltitle page."""
@@ -1160,29 +1115,7 @@ def parse_bibtex_authors(author_string: str) -> list:
     
     return formatted_authors
 
-def generate_yaml_header(title: str, chapter: str, authors: list, citation_key: str, toc_filename: str) -> str:
-    """Generate YAML header for Obsidian Markdown files."""
-    yaml_lines = ["---"]
-    
-    # Convert colons to hyphens in title to prevent YAML formatting issues
-    safe_title = title.replace(":", " - ")
-    yaml_lines.append(f"title: {safe_title}")
-    
-    # Remove .md extension from chapter
-    chapter_without_ext = chapter.replace(".md", "")
-    yaml_lines.append(f"chapter: {chapter_without_ext}")
-    
-    yaml_lines.append(f'toc: "[[{toc_filename.replace(".md", "")}]]"')
-    
-    # Add authors
-    for i, author in enumerate(authors, 1):
-        yaml_lines.append(f'author-{i}: "[[{author}]]"')
-    
-    # Add citation key
-    yaml_lines.append(f'citation-key: "[[@{citation_key}]]"')
-    yaml_lines.append("---")
-    
-    return "\n".join(yaml_lines)
+
 
 def extract_title_from_xhtml(xhtml_path: Path) -> str:
     """Extracts the <title> from an XHTML file and converts to Title Case."""
@@ -1192,301 +1125,19 @@ def extract_title_from_xhtml(xhtml_path: Path) -> str:
     raw_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
     return title_case(raw_title)
 
-def extract_xhtml_metadata(xhtml_path: Path) -> dict:
-    """
-    Enhanced front/back matter detection based on title and filename patterns.
-    Returns dict with title, is_frontmatter, is_backmatter, is_chapter.
-    """
-    from bs4 import BeautifulSoup
 
-    with open(xhtml_path, "r", encoding="utf-8") as f:
-        soup = BeautifulSoup(f, "lxml")
 
-    title_tag = soup.find(["h1", "title"])
-    title = title_tag.get_text(strip=True) if title_tag else xhtml_path.stem
 
-    lower_title = title.lower()
-    lower_filename = xhtml_path.stem.lower()
 
-    # Front matter patterns
-    front_keywords = (
-        "cover", "title", "copyright", "acknowledgements", "praise", "brand", "about", "preface", "foreword", "introduction"
-    )
-    back_keywords = (
-        "index", "references", "appendix", "bibliography", "conclusion", "notes"
-    )
 
-    is_frontmatter = any(k in lower_title for k in front_keywords) or any(k in lower_filename for k in front_keywords)
-    is_backmatter = any(k in lower_title for k in back_keywords) or any(k in lower_filename for k in back_keywords)
-    is_chapter = not (is_frontmatter or is_backmatter)
 
-    return {
-        "title": title,
-        "is_frontmatter": is_frontmatter,
-        "is_backmatter": is_backmatter,
-        "is_chapter": is_chapter
-    }
 
-def extract_subsections_from_xhtml(xhtml_path: Path) -> list:
-    """
-    Extract all subsections from an XHTML file based on level IDs.
-    Returns a list of subsection metadata for files that contain multiple subsections.
-    This handles the case where subsections are anchors within the same XHTML file as the chapter.
-    """
-    with open(xhtml_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'xml')
-    
-    subsections = []
-    body_tag = soup.find('body')
-    
-    if not body_tag or not isinstance(body_tag, Tag):
-        return subsections
-    
-    # Find all tags with level IDs (level1_000001, level2_000002, etc.)
-    level_tags = body_tag.find_all(id=True)
-    level_tags = []
-    for tag in body_tag.find_all(id=True):
-        if isinstance(tag, Tag):
-            tag_id = tag.get('id')
-            if tag_id and isinstance(tag_id, str) and re.match(r'^level\d+_', tag_id):
-                level_tags.append(tag)
-    
-    for tag in level_tags:
-        if isinstance(tag, Tag):
-            section_id = tag.get('id', '')
-            if not section_id or not isinstance(section_id, str):
-                continue
 
-            # Parse level and subsection number
-            parts = section_id.split('_')
-            if len(parts) >= 2:
-                level_part = parts[0]
-                if level_part.startswith('level'):
-                    try:
-                        level = int(level_part[5:])
-                        # Extract subsection number
-                        match = re.search(r'\d+', parts[1])
-                        subsection_num = int(match.group()) if match else 0
 
-                        # Extract title from the tag content
-                        title = tag.get_text(strip=True)
-                        if not title:
-                            # Try to find a heading within this tag
-                            heading = tag.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                            if heading and isinstance(heading, (Tag, NavigableString)):
-                                if hasattr(heading, "get_text"):
-                                    title = heading.get_text(strip=True)
-
-                        if title:
-                            subsections.append({
-                                'section_id': section_id,
-                                'level': level,
-                                'subsection_number': subsection_num,
-                                'title': title_case(title),
-                                'tag_name': tag.name
-                            })
-                    except (ValueError, AttributeError):
-                        continue
-    
-    # Sort subsections by level and subsection number
-    subsections.sort(key=lambda x: (x['level'], x['subsection_number']))
-    return subsections
-
-def is_chapter_boundary(title: str, label: str) -> bool:
-    """
-    Determine if a TOC entry represents a new chapter boundary.
-    Returns True if this should start a new chapter group.
-    """
-    import re
-    title_upper = title.upper()
-    label_upper = label.upper()
-    
-    # Primary patterns for chapter detection
-    chapter_patterns = [
-        r'^CHAPTER\s+\d+',           # "CHAPTER 1", "CHAPTER 2"
-        r'^SECTION\s+\d+',           # "SECTION 1", "SECTION 2" 
-        r'^PART\s+\d+',              # "PART 1", "PART 2"
-        r'^\d+\.\s+[A-Z]',           # "1. INTRODUCTION", "2. METHODS"
-        r'^[A-Z][A-Z\s]{10,}$',      # Long all-caps titles (likely chapters)
-        r'^INTRODUCTION$',            # Common chapter title
-        r'^CONCLUSION$',              # Common chapter title
-        r'^\d+\s*[-–]\s*[A-Z]',      # "1 - TITLE" format
-        r'^APPENDIX\s*[A-Z]?$',      # "APPENDIX A", "APPENDIX"
-        r'^BIBLIOGRAPHY$',           # Common back matter
-        r'^REFERENCES$',              # Common back matter
-        r'^GLOSSARY$',                # Common back matter
-        r'^INDEX$'                    # Common back matter
-    ]
-    
-    # Check title patterns
-    for pattern in chapter_patterns:
-        if re.match(pattern, title_upper):
-            return True
-        if re.match(pattern, label_upper):
-            return True
-    
-    # Additional heuristics
-    if len(title_upper) > 50 and title_upper.isupper():
-        return True  # Very long uppercase titles are likely chapters
-        
-    return False
-
-def validate_chapter_groups(chapter_groups, max_expected_chapters=20):
-    """
-    Validate chapter grouping results and apply fallbacks if needed.
-    If we detect too many single-file chapters, apply alternative grouping.
-    """
-    single_file_chapters = sum(1 for _, _, files in chapter_groups if len(files) == 1)
-    total_chapters = len(chapter_groups)
-    
-    # Check for over-grouping (chapters with too many files)
-    oversized_chapters = sum(1 for _, _, files in chapter_groups if len(files) > 10)
-    
-    # If more than 70% are single-file chapters and we have many chapters, 
-    # this suggests our detection failed
-    if total_chapters > max_expected_chapters or (single_file_chapters / total_chapters) > 0.7:
-        print(f"[WARNING] Detected {total_chapters} chapters with {single_file_chapters} single-file chapters")
-        print("[WARNING] This suggests chapter detection may have failed")
-        return False
-    
-    # If we have oversized chapters, that's also concerning
-    if oversized_chapters > 0:
-        print(f"[WARNING] Detected {oversized_chapters} chapters with more than 10 files")
-        print("[WARNING] This suggests over-grouping may have occurred")
-        return False
-    
-    return True
-
-def build_spine_driven_structure(opf_soup, content_root: Path) -> tuple:
-    """
-    NEW FUNCTION: Build chapter structure based on the spine in content.opf.
-    This method uses the spine (reading order) and heading structure from XHTML files
-    instead of relying on a nav.xhtml or toc.xhtml which may not be present.
-    """
-    print("\n=== BUILDING SPINE-DRIVEN STRUCTURE ===")
-
-    # Parse manifest and spine
-    manifest = {item["id"]: item for item in [
-        {"id": item.get("id"), "href": item.get("href"), "media-type": item.get("media-type")}
-        for item in opf_soup.find_all("item")
-    ]}
-    spine_ids = [item.get("idref") for item in opf_soup.find_all("itemref") if item.get("idref")]
-
-    # Resolve hrefs for spine items
-    spine_files = [manifest[item_id]["href"] for item_id in spine_ids if item_id in manifest]
-
-    # --- NEW GROUPING LOGIC BASED ON NUMERIC PREFIXES ---
-    import re
-    from collections import defaultdict
-    from pathlib import Path
-
-    # Group files by numeric prefix (e.g., chapter010, chapter010-01, etc.)
-    chapter_files = defaultdict(list)
-    for file in spine_files:
-        match = re.match(r"(.*?)([-_]?(\d{2,3}))?\.xhtml$", Path(file).stem)
-        if match:
-            prefix = match.group(1)
-            base_key = prefix.rstrip("-_")
-            chapter_files[base_key].append(file)
-        else:
-            chapter_files[file].append(file)  # fallback
-
-    # --- NEW LOGIC: Collect, sort, and index chapter groups ---
-    import re
-
-    def extract_numeric_prefix(title: str) -> int:
-        match = re.match(r"^\s*(\d{1,3})[\.\):\-\s]", title.strip())
-        return int(match.group(1)) if match else 9999
-
-    # Build initial chapter groups
-    unsorted_chapter_groups = []
-    frontmatter_files = []
-    backmatter_files = []
-
-    for key in sorted(chapter_files.keys()):
-        files = sorted(chapter_files[key])
-        first_file = files[0]
-        title = extract_title_from_xhtml(content_root / first_file)
-        if is_frontmatter_file(first_file, title):
-            frontmatter_files.extend(files)
-        elif is_backmatter_file(first_file, title):
-            backmatter_files.extend(files)
-        else:
-            unsorted_chapter_groups.append((title or key, files))
-
-    # Sort by numeric prefix in title
-    unsorted_chapter_groups.sort(key=lambda x: extract_numeric_prefix(x[0]))
-
-    # Assign chapter numbers sequentially
-    chapter_groups = []
-    for i, (title, files) in enumerate(unsorted_chapter_groups, start=1):
-        chapter_groups.append((i, title, files))
-
-    # --- Reclassify any chapter group with a title or filename match ---
-    reclassified = []
-    # Copy so we can remove from chapter_groups during iteration
-    for group in chapter_groups[:]:
-        _, title, files = group
-        if not files:
-            continue
-        first_file = files[0]
-        if is_frontmatter_file(first_file, title):
-            frontmatter_files.extend(files)
-            chapter_groups.remove(group)
-            reclassified.append((title, "front"))
-        elif is_backmatter_file(first_file, title):
-            backmatter_files.extend(files)
-            chapter_groups.remove(group)
-            reclassified.append((title, "back"))
-
-    if reclassified:
-        print(f"[INFO] Reclassified {len(reclassified)} misfiled chapters as front/back matter.")
-
-    # Print summary
-    print(f"Frontmatter files: {len(frontmatter_files)}")
-    print(f"Chapters: {len(chapter_groups)}")
-    for num, title, files in chapter_groups:
-        print(f"  Chapter {num:02d}: {title} ({len(files)} files)")
-    print(f"Backmatter files: {len(backmatter_files)}")
-
-    return chapter_groups, frontmatter_files, backmatter_files
 
 # === CLI ===
 
-def generate_obsidian_toc(conversion_log, output_dir: Path, book_title: str | None = None):
-    """Create a Markdown-formatted TOC compatible with Obsidian based on actual output files."""
-    book_title = book_title or ""
-    toc_lines = ["# Table of Contents", ""]
-    # Sort chapters by their index to maintain proper order
-    sorted_chapters = sorted(conversion_log["chapters"], key=lambda x: x["index"])
-    for chapter in sorted_chapters:
-        index = chapter["index"]
-        title = chapter["title"]
-        output_file = chapter["output_file"]
-        if "." in index:
-            parts = index.split(".")
-            if len(parts) >= 2 and parts[1] == "0":
-                indent = ""
-            else:
-                indent = "  "
-        else:
-            indent = ""
-        toc_link = output_file.replace('.md', '')
-        toc_lines.append(f"{indent}- [[{toc_link}]]")
-    toc_text = "\n".join(toc_lines)
-    # Create unique TOC filename based on book title
-    safe_book_title = safe_filename(book_title)
-    if safe_book_title:
-        toc_filename = f"00 - TOC for {safe_book_title}.md"
-    else:
-        toc_filename = "00 - Table of Contents.md"
-    
-    toc_path = output_dir / toc_filename
-    with open(toc_path, "w", encoding="utf-8") as f:
-        f.write(toc_text)
-    print(f"TOC written to: {toc_path}")
-    
-    return toc_filename
+
 
 def show_final_dialog(log: dict, elapsed_sec: float, md_status=True, cleanup_status=True, json_status=True):
     """Displays a summary dialog on macOS using AppleScript."""
@@ -1568,7 +1219,7 @@ from datetime import datetime, timezone
 import time
 import json
 
-def convert_book(epub_path: Path, output_dir_base: Path, bibtex_data: dict = None, use_obsidian_format: bool = True):
+def convert_book(epub_path: Path, output_dir_base: Path, bibtex_data: dict | None = None, use_obsidian_format: bool = True, skip_images: bool = False):
     """
     Main conversion function using the manifest-based pipeline.
     """
@@ -1587,22 +1238,34 @@ def convert_book(epub_path: Path, output_dir_base: Path, bibtex_data: dict = Non
         # Build manifest map from OPF
         with open(opf_path, "r", encoding="utf-8") as f:
             opf_soup = BeautifulSoup(f, "lxml")
-        manifest_map = build_manifest_map(opf_soup, opf_path)
+        manifest_items = build_manifest_map(opf_soup, opf_path)
 
         # Assign chapter structure and labels
-        chapter_map = assign_manifest_structure([
-            {
-                "filename": fname,
-                "filepath": fpath,
-            }
-            for fname, fpath in manifest_map.items()
-        ])
+        chapter_map = assign_manifest_structure(manifest_items)
 
         # Determine output directory name
         book_title = extract_book_title_from_copyright(content_root)
         safe_book_title = safe_filename(book_title) if book_title else epub_path.stem
         output_dir_path = output_dir_base / safe_book_title
         output_dir_path.mkdir(parents=True, exist_ok=True)
+
+        # Extract book metadata and find BibTeX entry if not provided
+        if bibtex_data is None:
+            book_metadata = extract_book_metadata_from_copyright(content_root)
+            if book_metadata and book_metadata.get('title') and book_metadata.get('authors'):
+                bibtex_data = find_bibtex_entry_by_title_and_authors(
+                    book_metadata['title'], 
+                    book_metadata['authors']
+                )
+                if bibtex_data:
+                    print(f"[INFO] Found BibTeX entry: {bibtex_data.get('citation_key', 'Unknown')}")
+                else:
+                    print("[INFO] No matching BibTeX entry found")
+
+        # Copy images if not skipped
+        if not skip_images:
+            assets_dir = output_dir_path / "assets"
+            copy_images(manifest_items, assets_dir)
 
         # Generate output markdown files
         generate_markdown_outputs(chapter_map, output_dir_path, bibtex_data)
@@ -1700,7 +1363,8 @@ if __name__ == "__main__":
         result = convert_book(
             epub_path=args.input,
             output_dir_base=args.output,
-            use_obsidian_format=args.obsidian
+            use_obsidian_format=args.obsidian,
+            skip_images=args.skip_images
         )
         print(f"Conversion completed: {result}")
     
@@ -1717,10 +1381,11 @@ if __name__ == "__main__":
 
 # --- PATCH: Update copy_images if present ---
 import shutil
-def copy_images(manifest_map: dict, assets_dir: Path):
+def copy_images(manifest_items: list[dict], assets_dir: Path):
     assets_dir.mkdir(parents=True, exist_ok=True)
     image_count = 0
-    for source_path in manifest_map.values():
+    for item in manifest_items:
+        source_path = item["filepath"]
         if source_path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.svg']:
             dest_path = assets_dir / source_path.name
             shutil.copy2(source_path, dest_path)

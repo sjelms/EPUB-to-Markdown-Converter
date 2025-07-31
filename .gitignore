@@ -129,6 +129,7 @@ dmypy.json
 # Helper context folder (troubleshooting docs)
 /helper_context
 
+
 # macOS Finder metadata
 .DS_Store
 .AppleDouble
